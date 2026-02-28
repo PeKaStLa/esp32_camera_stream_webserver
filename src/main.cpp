@@ -2,9 +2,25 @@
 #include <Arduino.h>
 #include "esp_log.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
+#include <mbedtls/base64.h>
 
 static const char* TAG = "camera";
+
+// Base64 encoding helper
+String base64_encode(const uint8_t* data, size_t len) {
+    size_t encoded_len = 0;
+    mbedtls_base64_encode(nullptr, 0, &encoded_len, data, len);
+    
+    unsigned char* encoded = (unsigned char*)malloc(encoded_len + 1);
+    if (!encoded) return "";
+    
+    mbedtls_base64_encode(encoded, encoded_len + 1, &encoded_len, data, len);
+    String result = String((const char*)encoded);
+    free(encoded);
+    return result;
+}
 
 // -------------------- PIN MAP --------------------
 // 4D Systems ESP32-S3 Gen4 (adjust if needed)
@@ -56,13 +72,13 @@ camera_config_t camera_config_template = {
 };
 
 // ----------------- RUNTIME SETTINGS -----------------
-int current_capture_quality = 25;
+int current_capture_quality = 4;
 const int capture_qualities[] = {0, 2, 4, 6, 8, 12, 18, 25, 35, 45, 63};
 const int capture_qualities_len = sizeof(capture_qualities) / sizeof(capture_qualities[0]);
 
 // Stream settings
-framesize_t stream_framesizes[] = {FRAMESIZE_QVGA, FRAMESIZE_VGA, FRAMESIZE_SVGA, FRAMESIZE_XGA};
-const char* stream_framesize_names[] = {"QVGA", "VGA", "SVGA", "XGA"};
+framesize_t stream_framesizes[] = {FRAMESIZE_QVGA, FRAMESIZE_VGA, FRAMESIZE_SVGA, FRAMESIZE_XGA, FRAMESIZE_UXGA};
+const char* stream_framesize_names[] = {"QVGA", "VGA", "SVGA", "XGA", "UXGA"};
 const int stream_framesize_len = sizeof(stream_framesizes) / sizeof(stream_framesizes[0]);
 int stream_framesize_index = 1; // default VGA
 int current_stream_fb_count = 1;
@@ -75,6 +91,13 @@ const char* password = "!1234567890!1234";
 // ------------------- SERVER -------------------
 WebServer server(80);
 
+// ------------------- SMTP SETTINGS -----------------
+const char* smtp_host = "smtp.gmail.com";
+const int smtp_port = 465;
+const char* smtp_user = "14peterstadler@gmail.com";
+const char* smtp_pass = "rrbt glgn neuk izwk";
+const char* smtp_from = "14peterstadler@gmail.com";
+const char* smtp_to = "14peterstadler@gmail.com";
 
 // ----------------- CAMERA INIT -----------------
 esp_err_t init_camera(framesize_t frame_size, int jpeg_quality, int fb_count) {
@@ -167,6 +190,129 @@ void handle_jpg() {
 
     esp_camera_fb_return(fb);
 }
+
+// --------- SIMPLE EMAIL SEND ---------
+bool send_email_with_fb(const char* to_addr, camera_fb_t * fb) {
+    if (!fb) return false;
+    
+    WiFiClientSecure client;
+    client.setInsecure(); // Skip certificate verification for simplicity
+    
+    if (!client.connect(smtp_host, smtp_port)) {
+        Serial.println("SMTP connection failed");
+        return false;
+    }
+    
+    // Read SMTP response
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    // Send EHLO
+    client.println("EHLO ESP32");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    // Login
+    client.println("AUTH LOGIN");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    client.println(base64_encode((uint8_t*)smtp_user, strlen(smtp_user)));
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    client.println(base64_encode((uint8_t*)smtp_pass, strlen(smtp_pass)));
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    // Send mail
+    client.print("MAIL FROM:<");
+    client.print(smtp_user);
+    client.println(">");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    client.print("RCPT TO:<");
+    client.print(to_addr);
+    client.println(">");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    client.println("DATA");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    // Email headers
+    String boundary = "boundary123456789";
+    client.print("From: ");
+    client.println(smtp_user);
+    client.print("To: ");
+    client.println(to_addr);
+    client.println("Subject: ESP32 Photo");
+    client.println("MIME-Version: 1.0");
+    client.print("Content-Type: multipart/mixed; boundary=\"");
+    client.print(boundary);
+    client.println("\"");
+    client.println();
+    
+    // Text part
+    client.print("--");
+    client.println(boundary);
+    client.println("Content-Type: text/plain");
+    client.println();
+    client.println("Photo from ESP32 Camera");
+    client.println();
+    
+    // Image attachment part
+    client.print("--");
+    client.println(boundary);
+    client.println("Content-Type: image/jpeg; name=\"photo.jpg\"");
+    client.println("Content-Transfer-Encoding: base64");
+    client.println("Content-Disposition: attachment; filename=\"photo.jpg\"");
+    client.println();
+    
+    // Base64 encode image with proper line wrapping (76 chars per line)
+    String img_b64 = base64_encode(fb->buf, fb->len);
+    const int LINE_LENGTH = 76;
+    for (size_t i = 0; i < img_b64.length(); i += LINE_LENGTH) {
+        int end = (i + LINE_LENGTH < img_b64.length()) ? i + LINE_LENGTH : img_b64.length();
+        client.println(img_b64.substring(i, end));
+    }
+    
+    // End boundary
+    client.println();
+    client.print("--");
+    client.print(boundary);
+    client.println("--");
+    client.println(".");
+    delay(100);
+    while (client.available()) client.readStringUntil('\n');
+    
+    client.println("QUIT");
+    client.stop();
+    
+    return true;
+}
+
+String base64_encode(uint8_t* data, size_t len) {
+    static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    String encoded = "";
+    
+    for (size_t i = 0; i < len; i += 3) {
+        uint8_t b1 = data[i];
+        uint8_t b2 = (i + 1 < len) ? data[i + 1] : 0;
+        uint8_t b3 = (i + 2 < len) ? data[i + 2] : 0;
+        
+        int n = (b1 << 16) | (b2 << 8) | b3;
+        encoded += base64_chars[(n >> 18) & 0x3F];
+        encoded += base64_chars[(n >> 12) & 0x3F];
+        encoded += (i + 1 < len) ? base64_chars[(n >> 6) & 0x3F] : '=';
+        encoded += (i + 2 < len) ? base64_chars[n & 0x3F] : '=';
+    }
+    
+    return encoded;
+}
+
 // ----------------- UI / CONTROL HANDLERS -----------------
 void handle_capture_page() {
     String html = "<h1>Capture</h1>";
@@ -174,8 +320,55 @@ void handle_capture_page() {
     html += "<button onclick=\"fetch('/quality?dir=down').then(()=>location.reload())\">&#9664;</button>";
     html += "<button onclick=\"fetch('/quality?dir=up').then(()=>location.reload())\">&#9654;</button>";
     html += "<p><img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:100%\"></p>";
+    html += "<p>";
+    html += "<button id=\"emailBtn\" onclick=\"sendEmail()\">Send via Email</button>";
+    html += "<span id=\"status\" style=\"margin-left:10px; font-weight:bold;\"></span>";
+    html += "</p>";
+    html += "<script>";
+    html += "function sendEmail() {";
+    html += "  const btn = document.getElementById('emailBtn');";
+    html += "  const status = document.getElementById('status');";
+    html += "  btn.disabled = true;";
+    html += "  status.innerText = '...sending...';";
+    html += "  status.style.color = 'orange';";
+    html += "  fetch('/send_email').then(r => {";
+    html += "    if(r.ok) {";
+    html += "      status.innerText = '✅ Email sent';";
+    html += "      status.style.color = 'green';";
+    html += "    } else {";
+    html += "      return r.text().then(t => {";
+    html += "        status.innerText = '❌ ' + t;";
+    html += "        status.style.color = 'red';";
+    html += "      });";
+    html += "    }";
+    html += "  }).catch(e => {";
+    html += "    status.innerText = '❌ Error: ' + e.message;";
+    html += "    status.style.color = 'red';";
+    html += "  }).finally(() => {";
+    html += "    btn.disabled = false;";
+    html += "  });";
+    html += "}";
+    html += "</script>";
     html += "<p><a href='/'>Back</a></p>";
     server.send(200, "text/html", html);
+}
+
+void handle_send_email() {
+    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) {
+        server.send(500, "text/plain", "Camera init failed");
+        return;
+    }
+    
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+        server.send(500, "text/plain", "Capture failed");
+        return;
+    }
+    
+    bool ok = send_email_with_fb(smtp_to, fb);
+    esp_camera_fb_return(fb);
+    
+    server.send(ok ? 200 : 500, "text/plain", ok ? "✅ Email sent" : "❌ Email send failed");
 }
 
 void handle_quality_change() {
@@ -204,8 +397,8 @@ void handle_stream_page() {
     html += "<button onclick=\"fetch('/stream_ctrl?action=framesize&dir=up').then(()=>location.reload())\">Frame &#9654;</button>";
     html += "<button onclick=\"fetch('/stream_ctrl?action=fb_count&value=1').then(()=>location.reload())\">FB:1</button>";
     html += "<button onclick=\"fetch('/stream_ctrl?action=fb_count&value=2').then(()=>location.reload())\">FB:2</button>";
-    html += "<p><img src=\"/stream.mjpg\" style=\"max-width:100%\"></p>";
     html += "<p><a href='/'>Back</a></p>";
+    html += "<p><img src=\"/stream.mjpg\" style=\"max-width:100%\"></p>";
     server.send(200, "text/html", html);
 }
 
@@ -282,6 +475,7 @@ void setup() {
     server.on("/stream", handle_stream_page); // Stream page with controls
     server.on("/stream.mjpg", handle_stream); // Raw MJPEG stream
     server.on("/stream_ctrl", handle_stream_ctrl);
+    server.on("/send_email", handle_send_email);
     server.onNotFound(handle_NotFound);    // This stops the [E] handler not found error
 
     server.begin();

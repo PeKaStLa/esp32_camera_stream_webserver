@@ -319,7 +319,6 @@ void handle_capture_page() {
     html += "<p>Current JPEG quality: <span id=\"q\">" + String(current_capture_quality) + "</span></p>";
     html += "<button onclick=\"fetch('/quality?dir=down').then(()=>location.reload())\">&#9664;</button>";
     html += "<button onclick=\"fetch('/quality?dir=up').then(()=>location.reload())\">&#9654;</button>";
-    html += "<p><img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:100%\"></p>";
     html += "<p>";
     html += "<button id=\"emailBtn\" onclick=\"sendEmail()\">Send via Email</button>";
     html += "<span id=\"status\" style=\"margin-left:10px; font-weight:bold;\"></span>";
@@ -350,6 +349,7 @@ void handle_capture_page() {
     html += "}";
     html += "</script>";
     html += "<p><a href='/'>Back</a></p>";
+    html += "<p><img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:100%\"></p>";
     server.send(200, "text/html", html);
 }
 

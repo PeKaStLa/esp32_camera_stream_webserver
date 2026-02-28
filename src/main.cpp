@@ -5,6 +5,7 @@
 #include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <mbedtls/base64.h>
+#include "credentials.h"
 
 static const char* TAG = "camera";
 
@@ -85,19 +86,19 @@ int current_stream_fb_count = 1;
 
 
 // ------------------- WIFI -------------------
-const char* ssid = "FRITZ!Box 7590 KP";
-const char* password = "!1234567890!1234";
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
 // ------------------- SERVER -------------------
 WebServer server(80);
 
 // ------------------- SMTP SETTINGS -----------------
-const char* smtp_host = "smtp.gmail.com";
-const int smtp_port = 465;
-const char* smtp_user = "14peterstadler@gmail.com";
-const char* smtp_pass = "rrbt glgn neuk izwk";
-const char* smtp_from = "14peterstadler@gmail.com";
-const char* smtp_to = "14peterstadler@gmail.com";
+const char* smtp_host = SMTP_HOST;
+const int smtp_port = SMTP_PORT;
+const char* smtp_user = SMTP_USER;
+const char* smtp_pass = SMTP_PASS;
+const char* smtp_from = SMTP_FROM;
+const char* smtp_to = SMTP_TO;
 
 // ----------------- CAMERA INIT -----------------
 esp_err_t init_camera(framesize_t frame_size, int jpeg_quality, int fb_count) {

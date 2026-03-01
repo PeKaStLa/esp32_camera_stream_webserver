@@ -6,9 +6,8 @@
 #include <WebServer.h>
 #include <mbedtls/base64.h>
 #include "credentials.h"
-#include <AccelStepper.h>
-#include <CheapStepper.h>
 #include <Stepper.h>
+#include <AccelStepper.h>
 
 static const char* TAG = "camera";
 
@@ -513,44 +512,52 @@ void handle_NotFound() {
 
 
 // initialize the stepper library on pins 8 through 11:
-Stepper stepperOne(2048, 4, 6, 5, 7);
+AccelStepper stepper1(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
+AccelStepper stepper2(AccelStepper::FULL4WIRE, 48, 21, 47, 39);
+//Stepper stepperOne(2048, 1, 42, 2, 41);
+//Stepper stepperTwo(2048, 48, 21, 47, 39);
 
 
 // -------------------- MOTOR LOGIC --------------------
-void move_left() {
-    stepperOne.step(100);
+void handle_forward() {
+  stepper1.move(2000); // Set target for 204 steps forward
+  server.send(200, "text/plain", "Moving-forward...");
 }
 
-void move_right() {
-    stepperOne.step(-100);
+void handle_backward() {
+  stepper1.move(-2000); // Set target for 204 steps forward
+  server.send(200, "text/plain", "Moving-back...");
 }
 
-void move_forward() {
-    //stepperTwo.setSpeed(500);
+
+void handle_left() {
+  stepper2.move(2000); // Set target for 204 steps forward
+  server.send(200, "text/plain", "Moving-left...");
 }
 
-void move_backward() {
-    //stepperTwo.setSpeed(-500);
+void handle_right() {
+  stepper2.move(-2000); // Set target for 204 steps forward
+  server.send(200, "text/plain", "Moving-right...");
 }
+
 
 void stop_motors() {
-    //stepperOne.setSpeed(0);
-    //stepperTwo.setSpeed(0);
-    //// This stops them immediately
-    //stepperOne.stop();
-    //stepperTwo.stop();
+    stepper1.stop(); // Decelerates to stop
+    stepper2.stop();
+    // To kill power immediately so they don't get hot:
+    stepper1.setCurrentPosition(stepper1.currentPosition()); 
+    stepper2.setCurrentPosition(stepper2.currentPosition());
 }
-
 
 
 void handle_move() {
     if (server.hasArg("dir")) {
         String direction = server.arg("dir");
         
-        if (direction == "up")         move_forward();
-        else if (direction == "down")  move_backward();
-        else if (direction == "left")  move_left();
-        else if (direction == "right") move_right();
+        if (direction == "forward")         handle_forward();
+        else if (direction == "backward")  handle_backward();
+        else if (direction == "left")  handle_left();
+        else if (direction == "right") handle_right();
         else if (direction == "stop")  stop_motors();
         
         server.send(200, "text/plain", "OK: " + direction);
@@ -558,8 +565,6 @@ void handle_move() {
         server.send(400, "text/plain", "Missing dir");
     }
 }
-
-
 
 
 
@@ -606,8 +611,13 @@ void setup() {
 
 
 
-    stepperOne.setSpeed(5);
+    //stepperOne.setSpeed(5); stepperTwo.setSpeed(5);
+    
+    stepper1.setMaxSpeed(1000.0);
+    stepper1.setAcceleration(500.0);
 
+    stepper2.setMaxSpeed(1000.0);
+    stepper2.setAcceleration(500.0);
 
     server.on("/", handle_root);           // Now just the IP will work!
     server.on("/capture", handle_capture_page);
@@ -632,23 +642,21 @@ const unsigned long motorInterval = 1000; // Print every 5 seconds
 
 
 void loop() {
-    //server.handleClient(); // Handle web requests
+    server.handleClient(); // Handle web requests
     
-
-    stepperOne.step(2048);
-    delay(500);
-    stepperOne.step(-2048);
-    delay(1000);
-
+    stepper1.run();
+    stepper2.run();
+    
     /*
-    if (millis() - lastMotorTime >= motorInterval) {
-        lastMotorTime = millis();
-
-        stepperOne.step(200);
-
-    }
-
-    
+    stepperOne.step(204);
+    delay(100);
+    stepperTwo.step(204);
+    delay(100);
+    stepperOne.step(-204);
+    delay(100);
+    stepperTwo.step(-204);
+    delay(100);
+    */
 
     // Periodic Heartbeat Log
     if (millis() - lastLogTime >= logInterval) {
@@ -665,6 +673,4 @@ void loop() {
             // WiFi.begin(ssid, password); // Optional: auto-reconnect trigger
         }
     }
-
-    */
 }

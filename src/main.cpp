@@ -6,8 +6,15 @@
 #include <WebServer.h>
 #include <mbedtls/base64.h>
 #include "credentials.h"
+#include <AccelStepper.h>
+#include <CheapStepper.h>
+#include <Stepper.h>
 
 static const char* TAG = "camera";
+
+uint8_t* last_photo_buf = nullptr;
+size_t last_photo_len = 0;
+
 
 // Base64 encoding helper
 String base64_encode(const uint8_t* data, size_t len) {
@@ -170,7 +177,7 @@ void handle_stream() {
 
 // ----------------- SINGLE CAPTURE -----------------
 void handle_jpg() {
-    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) { // UXGA + current dynamic quality
+    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) {
         server.send(500, "text/plain", "Capture camera init failed");
         return;
     }
@@ -180,6 +187,15 @@ void handle_jpg() {
         server.send(500, "text/plain", "Camera capture failed");
         return;
     }
+
+    // --- NEW: Save to Global Buffer in PSRAM ---
+    if (last_photo_buf) free(last_photo_buf); // Clear old photo
+    last_photo_buf = (uint8_t*)ps_malloc(fb->len); // Allocate in PSRAM
+    if (last_photo_buf) {
+        memcpy(last_photo_buf, fb->buf, fb->len);
+        last_photo_len = fb->len;
+    }
+    // -------------------------------------------
 
     server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
     server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -192,184 +208,191 @@ void handle_jpg() {
     esp_camera_fb_return(fb);
 }
 
-// --------- SIMPLE EMAIL SEND ---------
-bool send_email_with_fb(const char* to_addr, camera_fb_t * fb) {
-    if (!fb) return false;
-    
-    WiFiClientSecure client;
-    client.setInsecure(); // Skip certificate verification for simplicity
-    
-    if (!client.connect(smtp_host, smtp_port)) {
-        Serial.println("SMTP connection failed");
+
+// --------- OPTIMIZED EMAIL FROM PSRAM BUFFER ---------
+bool send_email_from_buffer(const char* to_addr, uint8_t* buf, size_t len) {
+    if (!buf || len == 0) {
+        Serial.println("[SMTP] Error: No data in buffer to send.");
         return false;
     }
+
+    WiFiClientSecure client;
+    client.setInsecure(); // Skip certificate verification for speed/simplicity
     
-    // Read SMTP response
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
+    Serial.println("[SMTP] Connecting to server...");
+    if (!client.connect(smtp_host, smtp_port)) {
+        Serial.println("[SMTP] Connection failed!");
+        return false;
+    }
+
+    // Lambda helper to consume SMTP server replies
+    auto clearResponse = [&]() {
+        delay(150); 
+        while (client.available()) {
+            // Serial.print((char)client.read()); // Uncomment this line to see SMTP logs in Serial
+            client.read();
+        }
+    };
+
+    clearResponse();
     
-    // Send EHLO
-    client.println("EHLO ESP32");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
+    // --- 1. SMTP Handshake & Auth ---
+    client.println("EHLO ESP32"); clearResponse();
+    client.println("AUTH LOGIN"); clearResponse();
+    // Encode credentials
+    client.println(base64_encode((const uint8_t*)smtp_user, strlen(smtp_user))); clearResponse();
+    client.println(base64_encode((const uint8_t*)smtp_pass, strlen(smtp_pass))); clearResponse();
     
-    // Login
-    client.println("AUTH LOGIN");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
+    // --- 2. Set Up Mail Transaction ---
+    client.print("MAIL FROM:<"); client.print(smtp_user); client.println(">"); clearResponse();
+    client.print("RCPT TO:<"); client.print(to_addr); client.println(">"); clearResponse();
+    client.println("DATA"); clearResponse();
     
-    client.println(base64_encode((uint8_t*)smtp_user, strlen(smtp_user)));
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
-    
-    client.println(base64_encode((uint8_t*)smtp_pass, strlen(smtp_pass)));
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
-    
-    // Send mail
-    client.print("MAIL FROM:<");
-    client.print(smtp_user);
-    client.println(">");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
-    
-    client.print("RCPT TO:<");
-    client.print(to_addr);
-    client.println(">");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
-    
-    client.println("DATA");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
-    
-    // Email headers
-    String boundary = "boundary123456789";
-    client.print("From: ");
-    client.println(smtp_user);
-    client.print("To: ");
-    client.println(to_addr);
-    client.println("Subject: ESP32 Photo");
+    // --- 3. Write Email Headers ---
+    String boundary = "esp32_m_boundary_987";
+    client.print("From: "); client.println(smtp_user);
+    client.print("To: "); client.println(to_addr);
+    client.println("Subject: ESP32-S3 Captured Photo");
     client.println("MIME-Version: 1.0");
-    client.print("Content-Type: multipart/mixed; boundary=\"");
-    client.print(boundary);
-    client.println("\"");
+    client.printf("Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary.c_str());
     client.println();
     
-    // Text part
-    client.print("--");
-    client.println(boundary);
-    client.println("Content-Type: text/plain");
-    client.println();
-    client.println("Photo from ESP32 Camera");
+    // --- 4. Write Body Text ---
+    client.printf("--%s\r\n", boundary.c_str());
+    client.println("Content-Type: text/plain\r\n");
+    client.println("Please find the requested photo from the ESP32-S3 attached.");
     client.println();
     
-    // Image attachment part
-    client.print("--");
-    client.println(boundary);
+    // --- 5. Write Attachment Header ---
+    client.printf("--%s\r\n", boundary.c_str());
     client.println("Content-Type: image/jpeg; name=\"photo.jpg\"");
     client.println("Content-Transfer-Encoding: base64");
-    client.println("Content-Disposition: attachment; filename=\"photo.jpg\"");
-    client.println();
+    client.println("Content-Disposition: attachment; filename=\"photo.jpg\"\r\n");
     
-    // Base64 encode image with proper line wrapping (76 chars per line)
-    String img_b64 = base64_encode(fb->buf, fb->len);
-    const int LINE_LENGTH = 76;
-    for (size_t i = 0; i < img_b64.length(); i += LINE_LENGTH) {
-        int end = (i + LINE_LENGTH < img_b64.length()) ? i + LINE_LENGTH : img_b64.length();
-        client.println(img_b64.substring(i, end));
+    // --- 6. BUFFERED BASE64 ENCODING & SENDING ---
+    Serial.println("[SMTP] Encoding and streaming Base64 data...");
+    
+    // Convert the PSRAM buffer to a Base64 string
+    String img_b64 = base64_encode((const uint8_t*)buf, len);
+    
+    if (img_b64.length() == 0) {
+        Serial.println("[SMTP] Base64 Encoding failed!");
+        client.stop();
+        return false;
+    }
+
+    const int CHUNK_SIZE = 4096; // 4KB Chunks for SSL efficiency
+    int totalLen = img_b64.length();
+    int spent = 0;
+
+    while (spent < totalLen) {
+        int toSend = (spent + CHUNK_SIZE < totalLen) ? CHUNK_SIZE : (totalLen - spent);
+        
+        // Write the chunk as raw bytes to keep SSL packets large
+        client.write((const uint8_t*)(img_b64.c_str() + spent), toSend);
+        
+        spent += toSend;
+        yield(); // Feed the watchdog to prevent reset
     }
     
-    // End boundary
-    client.println();
-    client.print("--");
-    client.print(boundary);
-    client.println("--");
-    client.println(".");
-    delay(100);
-    while (client.available()) client.readStringUntil('\n');
+    client.println(); // Final line ending for the Base64 block
+    // ----------------------------------------------
+
+    // --- 7. Finalize & Close ---
+    client.printf("\r\n--%s--\r\n", boundary.c_str());
+    client.println("."); // Required by SMTP to signal end of DATA
+    clearResponse();
     
     client.println("QUIT");
     client.stop();
     
-    return true;
+    Serial.println("[SMTP] Email sent successfully!");
+    return true; // The function now always returns a value
 }
 
-String base64_encode(uint8_t* data, size_t len) {
-    static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    String encoded = "";
-    
-    for (size_t i = 0; i < len; i += 3) {
-        uint8_t b1 = data[i];
-        uint8_t b2 = (i + 1 < len) ? data[i + 1] : 0;
-        uint8_t b3 = (i + 2 < len) ? data[i + 2] : 0;
-        
-        int n = (b1 << 16) | (b2 << 8) | b3;
-        encoded += base64_chars[(n >> 18) & 0x3F];
-        encoded += base64_chars[(n >> 12) & 0x3F];
-        encoded += (i + 1 < len) ? base64_chars[(n >> 6) & 0x3F] : '=';
-        encoded += (i + 2 < len) ? base64_chars[n & 0x3F] : '=';
-    }
-    
-    return encoded;
+
+
+
+
+String getMotorControls() {
+    String html = "<div class='motor-container'>";
+    html += "  <div class='dpad'>";
+    html += "    <div style='grid-area: up;'><button onmousedown=\"go('forward')\" onmouseup=\"go('stop')\" ontouchstart=\"go('forward')\" ontouchend=\"go('stop')\">^</button></div>";
+    html += "    <div style='grid-area: left;'><button onmousedown=\"go('left')\" onmouseup=\"go('stop')\" ontouchstart=\"go('left')\" ontouchend=\"go('stop')\"><</button></div>";
+    html += "    <div style='grid-area: stop;'><button style='background:#ffcccc' onmousedown=\"go('stop')\" ontouchstart=\"go('stop')\">STOP</button></div>";
+    html += "    <div style='grid-area: right;'><button onmousedown=\"go('right')\" onmouseup=\"go('stop')\" ontouchstart=\"go('right')\" ontouchend=\"go('stop')\">></button></div>";
+    html += "    <div style='grid-area: down;'><button onmousedown=\"go('backward')\" onmouseup=\"go('stop')\" ontouchstart=\"go('backward')\" ontouchend=\"go('stop')\">V</button></div>";
+    html += "  </div>";
+    html += "</div>";
+    return html;
 }
 
-// ----------------- UI / CONTROL HANDLERS -----------------
 void handle_capture_page() {
-    String html = "<h1>Capture</h1>";
-    html += "<p>Current JPEG quality: <span id=\"q\">" + String(current_capture_quality) + "</span></p>";
-    html += "<button onclick=\"fetch('/quality?dir=down').then(()=>location.reload())\">&#9664;</button>";
-    html += "<button onclick=\"fetch('/quality?dir=up').then(()=>location.reload())\">&#9654;</button>";
-    html += "<p>";
-    html += "<button id=\"emailBtn\" onclick=\"sendEmail()\">Send via Email</button>";
-    html += "<span id=\"status\" style=\"margin-left:10px; font-weight:bold;\"></span>";
-    html += "</p>";
+    String html = "<html><head><style>";
+    // Layout CSS
+    html += "body { font-family: sans-serif; text-align: center; }";
+    html += ".control-panel { display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap; margin: 20px 0; }";
+    html += ".dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; }";
+    html += ".camera-settings { display: flex; flex-direction: column; gap: 8px; text-align: left; border-left: 2px solid #ddd; padding-left: 20px; }";
+    html += "button { padding: 12px; font-weight: bold; cursor: pointer; min-width: 55px; border-radius: 8px; border: 1px solid #ccc; }";
+    html += ".action-btn { background: #fff3cd; width: 100%; }";
+    html += "</style></head><body>";
+
+    html += "<h1>ESP32-S3 Capture</h1>";
+
+    // Main UI Row
+    html += "<div class='control-panel'>";
+    
+    // Left: Motors
+    html += getMotorControls();
+
+    // Right: Camera Controls
+    html += "  <div class='camera-settings'>";
+    html += "    <button class='action-btn' onclick=\"refreshImage()\">CAPTURE NEW</button>";
+    html += "    <div>Quality: <span id='q'>" + String(current_capture_quality) + "</span>";
+    html += "      <button onclick=\"changeQuality('better')\">+ better</button>";
+    html += "      <button onclick=\"changeQuality('less')\">- less</button>";
+    html += "    </div>";
+    html += "    <button id='emailBtn' onclick=\"sendEmail()\" style='background:#d1e7ff'>Send Email</button>";
+    html += "    <span id='status' style='font-size: 0.8em;'></span>";
+    html += "  </div>";
+    
+    html += "</div>"; // End control-panel
+
+    html += "<p><a href='/'>[ Back to Menu ]</a></p>";
+    html += "<img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:95%; border:2px solid #333;\">";
+
+    // JavaScript
     html += "<script>";
+    html += "function go(dir){ fetch('/move?dir=' + dir); }";
+    html += "function refreshImage(){ const img=document.getElementById('photo'); img.src='/capture.jpg?ts='+new Date().getTime(); }";
+    html += "function changeQuality(dir){ fetch('/quality?dir='+dir).then(r=>r.json()).then(d=>{document.getElementById('q').innerText=d.quality; refreshImage();}); }";
+    
+    // Email Function
     html += "function sendEmail() {";
-    html += "  const btn = document.getElementById('emailBtn');";
-    html += "  const status = document.getElementById('status');";
-    html += "  btn.disabled = true;";
-    html += "  status.innerText = '...sending...';";
-    html += "  status.style.color = 'orange';";
-    html += "  fetch('/send_email').then(r => {";
-    html += "    if(r.ok) {";
-    html += "      status.innerText = '✅ Email sent';";
-    html += "      status.style.color = 'green';";
-    html += "    } else {";
-    html += "      return r.text().then(t => {";
-    html += "        status.innerText = '❌ ' + t;";
-    html += "        status.style.color = 'red';";
-    html += "      });";
-    html += "    }";
-    html += "  }).catch(e => {";
-    html += "    status.innerText = '❌ Error: ' + e.message;";
-    html += "    status.style.color = 'red';";
-    html += "  }).finally(() => {";
-    html += "    btn.disabled = false;";
-    html += "  });";
+    html += "  const btn = document.getElementById('emailBtn'); const status = document.getElementById('status');";
+    html += "  btn.disabled = true; status.innerText = '...sending...'; status.style.color = 'orange';";
+    html += "  fetch('/send_email').then(r => r.ok ? (status.innerText='Sent', status.style.color='green') : r.text().then(t=>(status.innerText='Error '+t, status.style.color='red')))";
+    html += "  .catch(e => status.innerText = 'Error').finally(() => btn.disabled = false);";
     html += "}";
-    html += "</script>";
-    html += "<p><a href='/'>Back</a></p>";
-    html += "<p><img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:100%\"></p>";
+    html += "</script></body></html>";
+
     server.send(200, "text/html", html);
 }
 
+
+
 void handle_send_email() {
-    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) {
-        server.send(500, "text/plain", "Camera init failed");
+    if (last_photo_buf == nullptr || last_photo_len == 0) {
+        server.send(400, "text/plain", "No photo captured yet! Please click Capture New first.");
         return;
     }
     
-    camera_fb_t * fb = esp_camera_fb_get();
-    if (!fb) {
-        server.send(500, "text/plain", "Capture failed");
-        return;
-    }
+    // We create a "fake" fb structure to pass to your email function
+    // or simply modify your email function to accept raw buffer + len
+    bool ok = send_email_from_buffer(smtp_to, last_photo_buf, last_photo_len);
     
-    bool ok = send_email_with_fb(smtp_to, fb);
-    esp_camera_fb_return(fb);
-    
-    server.send(ok ? 200 : 500, "text/plain", ok ? "✅ Email sent" : "❌ Email send failed");
+    server.send(ok ? 200 : 500, "text/plain", ok ? "Email sent" : "Email send failed");
 }
 
 void handle_quality_change() {
@@ -378,9 +401,9 @@ void handle_quality_change() {
     int idx = 0;
     for (int i = 0; i < capture_qualities_len; ++i) if (capture_qualities[i] == current_capture_quality) idx = i;
 
-    if (dir == "up") {
+    if (dir == "less") {
         if (idx < capture_qualities_len - 1) idx++;
-    } else if (dir == "down") {
+    } else if (dir == "better") {
         if (idx > 0) idx--;
     } else if (server.hasArg("value")) {
         int v = server.arg("value").toInt();
@@ -392,14 +415,67 @@ void handle_quality_change() {
 }
 
 void handle_stream_page() {
-    String html = "<h1>Live Stream</h1>";
-    html += "<p>Frame size: <span id=\"fs\">" + String(stream_framesize_names[stream_framesize_index]) + "</span> | fb_count: <span id=\"fb\">" + String(current_stream_fb_count) + "</span></p>";
-    html += "<button onclick=\"fetch('/stream_ctrl?action=framesize&dir=down').then(()=>location.reload())\">Frame &#9664;</button>";
-    html += "<button onclick=\"fetch('/stream_ctrl?action=framesize&dir=up').then(()=>location.reload())\">Frame &#9654;</button>";
-    html += "<button onclick=\"fetch('/stream_ctrl?action=fb_count&value=1').then(()=>location.reload())\">FB:1</button>";
-    html += "<button onclick=\"fetch('/stream_ctrl?action=fb_count&value=2').then(()=>location.reload())\">FB:2</button>";
-    html += "<p><a href='/'>Back</a></p>";
-    html += "<p><img src=\"/stream.mjpg\" style=\"max-width:100%\"></p>";
+    String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<style>";
+    html += "  body { font-family: sans-serif; text-align: center; background: #f4f4f4; margin: 0; padding: 10px; }";
+    html += "  .main-container { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 20px; margin-top: 10px; }";
+    html += "  .video-pane { flex: 1; min-width: 320px; max-width: 800px; }";
+    html += "  .video-pane img { width: 100%; border: 3px solid #333; border-radius: 8px; background: #000; }";
+    html += "  .side-panel { width: 300px; display: flex; flex-direction: column; gap: 15px; background: #fff; padding: 15px; border-radius: 10px; shadow: 0 4px 6px rgba(0,0,0,0.1); }";
+    html += "  .dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; justify-content: center; }";
+    html += "  button { padding: 12px; font-weight: bold; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: #eee; }";
+    html += "  .stream-opt { font-size: 0.9em; color: #555; text-align: left; }";
+    html += "  .nav-link { margin-top: 10px; display: block; color: #666; text-decoration: none; }";
+    html += "</style></head><body>";
+
+    html += "<h2>ESP32-S3 Live Stream</h2>";
+
+    html += "<div class='main-container'>";
+    
+    // LEFT SIDE: Video
+    html += "  <div class='video-pane'>";
+    html += "    <img src='/stream.mjpg' id='streamView'>";
+    html += "  </div>";
+
+    // RIGHT SIDE: Controls
+    html += "  <div class='side-panel'>";
+    
+    // Motor Controls (The D-Pad)
+    html += "    <div style='border-bottom: 1px solid #eee; padding-bottom: 15px;'>";
+    html += "      <h4 style='margin:0 0 10px 0;'>Movement</h4>";
+    html +=        getMotorControls(); 
+    html += "    </div>";
+
+    // Stream Settings
+    html += "    <div class='stream-opt'>";
+    html += "      <h4 style='margin:0 0 10px 0;'>Stream Settings</h4>";
+    html += "      <p>Size: <b id='fs'>" + String(stream_framesize_names[stream_framesize_index]) + "</b></p>";
+    html += "      <button onclick=\"updateStream('framesize','down')\">&#9664;</button>";
+    html += "      <button onclick=\"updateStream('framesize','up')\">&#9654;</button>";
+    html += "      <p>Buffer (FB): <b id='fb'>" + String(current_stream_fb_count) + "</b></p>";
+    html += "      <button onclick=\"updateStream('fb_count','1')\">FB:1</button>";
+    html += "      <button onclick=\"updateStream('fb_count','2')\">FB:2</button>";
+    html += "    </div>";
+
+    html += "    <a href='/' class='nav-link'>&larr; Back to Menu</a>";
+    html += "  </div>"; // End side-panel
+    html += "</div>";   // End main-container
+
+    // JavaScript for AJAX updates (No reload!)
+    html += "<script>";
+    html += "function go(dir){ fetch('/move?dir=' + dir); }";
+    html += "function updateStream(action, value){ ";
+    html += "  let url = '/stream_ctrl?action=' + action + (action==='framesize' ? '&dir=' : '&value=') + value;";
+    html += "  fetch(url).then(() => {";
+    html += "    if(action==='framesize') location.reload();"; // Resolution change usually needs a reconnect
+    html += "    else fetch(location.href).then(r=>r.text()).then(h=>{";
+    html += "      let parser = new DOMParser(); let doc = parser.parseFromString(h, 'text/html');";
+    html += "      document.getElementById('fb').innerText = doc.getElementById('fb').innerText;";
+    html += "    });";
+    html += "  });";
+    html += "}";
+    html += "</script></body></html>";
+
     server.send(200, "text/html", html);
 }
 
@@ -433,9 +509,65 @@ void handle_root() {
 void handle_NotFound() {
     server.send(404, "text/plain", "Not Found");
 }
+
+
+
+// initialize the stepper library on pins 8 through 11:
+Stepper stepperOne(2048, 4, 6, 5, 7);
+
+
+// -------------------- MOTOR LOGIC --------------------
+void move_left() {
+    stepperOne.step(100);
+}
+
+void move_right() {
+    stepperOne.step(-100);
+}
+
+void move_forward() {
+    //stepperTwo.setSpeed(500);
+}
+
+void move_backward() {
+    //stepperTwo.setSpeed(-500);
+}
+
+void stop_motors() {
+    //stepperOne.setSpeed(0);
+    //stepperTwo.setSpeed(0);
+    //// This stops them immediately
+    //stepperOne.stop();
+    //stepperTwo.stop();
+}
+
+
+
+void handle_move() {
+    if (server.hasArg("dir")) {
+        String direction = server.arg("dir");
+        
+        if (direction == "up")         move_forward();
+        else if (direction == "down")  move_backward();
+        else if (direction == "left")  move_left();
+        else if (direction == "right") move_right();
+        else if (direction == "stop")  stop_motors();
+        
+        server.send(200, "text/plain", "OK: " + direction);
+    } else {
+        server.send(400, "text/plain", "Missing dir");
+    }
+}
+
+
+
+
+
 // ------------------- ARDUINO -------------------
 void setup() {
     Serial.begin(115200);
+    last_photo_buf = nullptr; // Initialize to empty
+    last_photo_len = 0;
     Serial.println("\n--- BOOT ---");
     delay(900);
 
@@ -449,14 +581,17 @@ void setup() {
     Serial.printf("PSRAM: %s\n", psramFound() ? "OK" : "FAIL");
 
     // Wait up to 5 seconds for Serial Monitor to open
-    while (!Serial && millis() < 9000) {
+    while (!Serial && millis() < 5000) {
         delay(10);
     }
 
-    if(init_camera(stream_framesizes[stream_framesize_index], 25, current_stream_fb_count) != ESP_OK) {
-        Serial.println("Camera failed to initialize!");
-        while(true) delay(1000);
+    // Attempt to initialize camera until success
+    while (init_camera(stream_framesizes[stream_framesize_index], 25, current_stream_fb_count) != ESP_OK) {
+        Serial.println("Camera failed to initialize! Retrying in 1 second...");
+        delay(1000);  // wait a bit before retry
     }
+
+    Serial.println("Camera initialized successfully!");
 
     WiFi.begin(ssid, password);
     WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
@@ -469,6 +604,11 @@ void setup() {
     Serial.print("WiFi connected! IP: ");
     Serial.println(WiFi.localIP());
 
+
+
+    stepperOne.setSpeed(5);
+
+
     server.on("/", handle_root);           // Now just the IP will work!
     server.on("/capture", handle_capture_page);
     server.on("/capture.jpg", handle_jpg);
@@ -477,6 +617,7 @@ void setup() {
     server.on("/stream.mjpg", handle_stream); // Raw MJPEG stream
     server.on("/stream_ctrl", handle_stream_ctrl);
     server.on("/send_email", handle_send_email);
+    server.on("/move", handle_move);
     server.onNotFound(handle_NotFound);    // This stops the [E] handler not found error
 
     server.begin();
@@ -486,8 +627,28 @@ void setup() {
 unsigned long lastLogTime = 0;
 const unsigned long logInterval = 5000; // Print every 5 seconds
 
+unsigned long lastMotorTime = 0;
+const unsigned long motorInterval = 1000; // Print every 5 seconds
+
+
 void loop() {
-    server.handleClient();
+    //server.handleClient(); // Handle web requests
+    
+
+    stepperOne.step(2048);
+    delay(500);
+    stepperOne.step(-2048);
+    delay(1000);
+
+    /*
+    if (millis() - lastMotorTime >= motorInterval) {
+        lastMotorTime = millis();
+
+        stepperOne.step(200);
+
+    }
+
+    
 
     // Periodic Heartbeat Log
     if (millis() - lastLogTime >= logInterval) {
@@ -504,4 +665,6 @@ void loop() {
             // WiFi.begin(ssid, password); // Optional: auto-reconnect trigger
         }
     }
+
+    */
 }

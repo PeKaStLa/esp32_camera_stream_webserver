@@ -11,9 +11,35 @@
 
 static const char* TAG = "camera";
 
+#define MAX_UXGA_SIZE (1024 * 1024) // 1MB Buffer
 uint8_t* last_photo_buf = nullptr;
 size_t last_photo_len = 0;
 
+
+
+// ------------------- SERVER -------------------
+WebServer server(80);
+
+
+// initialize the stepper library on pins 8 through 11:
+AccelStepper stepper1(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
+AccelStepper stepper2(AccelStepper::FULL4WIRE, 47, 38, 21, 39);
+
+
+void handle_show_last_photo() {
+    if (last_photo_buf == nullptr || last_photo_len == 0) {
+        server.send(404, "text/plain", "No image in buffer yet.");
+        return;
+    }
+
+    // Clear any previous headers to be safe
+    server.setContentLength(last_photo_len); 
+    server.sendHeader("Content-Type", "image/jpeg");
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    
+    // Send the data sitting in your last_photo_buf
+    server.sendContent_P((const char *)last_photo_buf, last_photo_len);
+}
 
 // Base64 encoding helper
 String base64_encode(const uint8_t* data, size_t len) {
@@ -95,9 +121,6 @@ int current_stream_fb_count = 1;
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 
-// ------------------- SERVER -------------------
-WebServer server(80);
-
 // ------------------- SMTP SETTINGS -----------------
 const char* smtp_host = SMTP_HOST;
 const int smtp_port = SMTP_PORT;
@@ -150,7 +173,9 @@ void handle_stream() {
                        "Access-Control-Allow-Origin: *\r\n"
                        "\r\n");
 
- while (client.connected()) {
+    while (client.connected()) {
+        if (server.client().available()) break;
+
         camera_fb_t * fb = esp_camera_fb_get();
         if (!fb) continue;
 
@@ -164,48 +189,86 @@ void handle_stream() {
             break;
         }
 
+
+
         esp_camera_fb_return(fb);
 
         unsigned long start = millis();
         while(millis() - start < 200) { // 5 FPS
+            stepper1.run(); 
+            stepper2.run();
             server.handleClient();
-            yield();
-        }
+            yield();}
     }
 }
 
+void handle_back_to_menu() {
+    // 1. Force the camera to 'sleep' to stop DMA background tasks
+    // This prevents the "Capture camera init failed" on the next page
+    esp_camera_deinit(); 
+    
+    // 2. Clear the current client socket
+    WiFiClient client = server.client();
+    if (client) {
+        client.flush(); // Push out any remaining bytes
+        client.stop();  // Close the door
+    }
+
+    // 3. Redirect the browser to the root "/"
+    server.sendHeader("Location", "/");
+    server.send(303); // 303 See Other is the standard for "Go elsewhere"
+}
+
+
+
 // ----------------- SINGLE CAPTURE -----------------
 void handle_jpg() {
+    // 1. Initialize camera for high-res UXGA
     if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) {
         server.send(500, "text/plain", "Capture camera init failed");
         return;
     }
 
+    // 2. Grab the frame from the sensor
     camera_fb_t * fb = esp_camera_fb_get();
     if (!fb) {
-        server.send(500, "text/plain", "Camera capture failed");
+        server.send(500, "text/plain", "Camera Error");
         return;
     }
 
-    // --- NEW: Save to Global Buffer in PSRAM ---
-    if (last_photo_buf) free(last_photo_buf); // Clear old photo
-    last_photo_buf = (uint8_t*)ps_malloc(fb->len); // Allocate in PSRAM
-    if (last_photo_buf) {
+    // 3. Update the global PSRAM buffer for the "Reload" feature
+    // We yield here to let background WiFi tasks breathe before the big copy
+    yield(); 
+    if (fb->len <= MAX_UXGA_SIZE && last_photo_buf != nullptr) {
         memcpy(last_photo_buf, fb->buf, fb->len);
         last_photo_len = fb->len;
     }
-    // -------------------------------------------
 
+    // 4. Send the headers manually to avoid "Multiple Content-Length" errors
     server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.setContentLength(fb->len);
+    server.setContentLength(fb->len); // Crucial for large UXGA files
+    
+    // Send 200 OK with the Type, but an empty body string 
+    // to prevent the library from adding its own length.
     server.send(200, "image/jpeg", "");
 
-    WiFiClient client = server.client();
-    client.write(fb->buf, fb->len);
+    // 5. Stream the actual bytes
+    // Using sendContent_P is safer than client.write for large files 
+    // because it handles the TCP windowing for you.
+    server.sendContent_P((const char *)fb->buf, fb->len);
 
+    // 6. Release the hardware buffer
     esp_camera_fb_return(fb);
+
+    // 7. Optional: Pulse motors one last time after the heavy lifting
+    stepper1.run();
+    stepper2.run();
 }
+
+
+
+
 
 
 // --------- OPTIMIZED EMAIL FROM PSRAM BUFFER ---------
@@ -358,13 +421,14 @@ void handle_capture_page() {
     
     html += "</div>"; // End control-panel
 
-    html += "<p><a href='/'>[ Back to Menu ]</a></p>";
-    html += "<img id=\"photo\" src=\"/capture.jpg?ts=" + String(millis()) + "\" style=\"max-width:95%; border:2px solid #333;\">";
+    html += "<p><a href='/back'>[ Back to Menu ]</a></p>";
 
+    html += "<button onclick=\"location.href='/stream'\" style=\"background:#c8e6c9;\">BACK TO LIVE STREAM </button>";
+    html += "<img id=\"photo\" src=\"/last_buffer.jpg?ts=" + String(millis()) + "\" style=\"max-width:95%; border:2px solid #333;\">";
     // JavaScript
     html += "<script>";
     html += "function go(dir){ fetch('/move?dir=' + dir); }";
-    html += "function refreshImage(){ const img=document.getElementById('photo'); img.src='/capture.jpg?ts='+new Date().getTime(); }";
+    html += "function refreshImage(){ const img=document.getElementById('photo'); img.src='/capture.jpg?ts='+new Date().getTime(); img.style.display = 'inline-block';}";
     html += "function changeQuality(dir){ fetch('/quality?dir='+dir).then(r=>r.json()).then(d=>{document.getElementById('q').innerText=d.quality; refreshImage();}); }";
     
     // Email Function
@@ -456,7 +520,8 @@ void handle_stream_page() {
     html += "      <button onclick=\"updateStream('fb_count','2')\">FB:2</button>";
     html += "    </div>";
 
-    html += "    <a href='/' class='nav-link'>&larr; Back to Menu</a>";
+    html += "<button onclick=\"location.href='/capture'\" style=\"background:#ffeb3b; padding:15px; font-weight:bold;\">GO TO UXGA CAPTURE</button>";
+    html += "<p><a href='/back'>[ Back to Menu ]</a></p>";
     html += "  </div>"; // End side-panel
     html += "</div>";   // End main-container
 
@@ -497,6 +562,8 @@ void handle_stream_ctrl() {
     }
     server.send(400, "text/plain", "Bad Request");
 }
+
+
 // ----------------- WEB -----------------
 void handle_root() {
     String html = "<h1>ESP32-S3 Gen4 Camera</h1>";
@@ -510,12 +577,6 @@ void handle_NotFound() {
 }
 
 
-
-// initialize the stepper library on pins 8 through 11:
-AccelStepper stepper1(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
-AccelStepper stepper2(AccelStepper::FULL4WIRE, 48, 21, 47, 39);
-//Stepper stepperOne(2048, 1, 42, 2, 41);
-//Stepper stepperTwo(2048, 48, 21, 47, 39);
 
 
 // -------------------- MOTOR LOGIC --------------------
@@ -582,6 +643,13 @@ void setup() {
             delay(1000);
         }
     }
+
+    // Allocate 1MB in PSRAM once and for all
+    last_photo_buf = (uint8_t*)ps_malloc(MAX_UXGA_SIZE);
+    if (last_photo_buf == nullptr) {
+        Serial.println("PSRAM Allocation Failed!");
+    }
+
     Serial.printf("✅ PSRAM OK: %d bytes\n", ESP.getPsramSize());
     Serial.printf("PSRAM: %s\n", psramFound() ? "OK" : "FAIL");
 
@@ -622,12 +690,14 @@ void setup() {
     server.on("/", handle_root);           // Now just the IP will work!
     server.on("/capture", handle_capture_page);
     server.on("/capture.jpg", handle_jpg);
+    server.on("/last_buffer.jpg", handle_show_last_photo); // Logic: JUST SEND BUF (No snap)    
     server.on("/quality", handle_quality_change);
     server.on("/stream", handle_stream_page); // Stream page with controls
     server.on("/stream.mjpg", handle_stream); // Raw MJPEG stream
     server.on("/stream_ctrl", handle_stream_ctrl);
     server.on("/send_email", handle_send_email);
     server.on("/move", handle_move);
+    server.on("/back", handle_back_to_menu);
     server.onNotFound(handle_NotFound);    // This stops the [E] handler not found error
 
     server.begin();

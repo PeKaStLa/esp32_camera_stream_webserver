@@ -105,7 +105,7 @@ camera_config_t camera_config_template = {
 };
 
 // ----------------- RUNTIME SETTINGS -----------------
-int current_capture_quality = 8;
+int current_capture_quality = 4;
 const int capture_qualities[] = {0, 1, 2, 3, 4, 6, 8, 12, 18, 25, 35, 45, 63};
 const int capture_qualities_len = sizeof(capture_qualities) / sizeof(capture_qualities[0]);
 
@@ -113,8 +113,8 @@ const int capture_qualities_len = sizeof(capture_qualities) / sizeof(capture_qua
 framesize_t stream_framesizes[] = {FRAMESIZE_QVGA, FRAMESIZE_VGA, FRAMESIZE_SVGA, FRAMESIZE_XGA, FRAMESIZE_UXGA};
 const char* stream_framesize_names[] = {"QVGA", "VGA", "SVGA", "XGA", "UXGA"};
 const int stream_framesize_len = sizeof(stream_framesizes) / sizeof(stream_framesizes[0]);
-int stream_framesize_index = 1; // default VGA
-int current_stream_fb_count = 1;
+int stream_framesize_index = 0; // default VGA
+int current_stream_fb_count = 3;
 
 
 // ------------------- WIFI -------------------
@@ -159,7 +159,7 @@ static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 void handle_stream() {
-    if(init_camera(stream_framesizes[stream_framesize_index], 25, current_stream_fb_count) != ESP_OK) { // VGA + medium quality
+    if(init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) { // VGA + medium quality
         server.send(500, "text/plain", "Stream camera init failed");
         return;
     }
@@ -173,7 +173,10 @@ void handle_stream() {
                        "Access-Control-Allow-Origin: *\r\n"
                        "\r\n");
 
+
     while (client.connected()) {
+
+
         if (server.client().available()) break;
 
         camera_fb_t * fb = esp_camera_fb_get();
@@ -192,6 +195,11 @@ void handle_stream() {
 
 
         esp_camera_fb_return(fb);
+
+        if (!client.connected()) {
+        esp_camera_fb_return(fb);
+        break; // EXIT THE LOOP IMMEDIATELY
+        }
 
         unsigned long start = millis();
         while(millis() - start < 200) { // 5 FPS
@@ -224,7 +232,7 @@ void handle_back_to_menu() {
 // ----------------- SINGLE CAPTURE -----------------
 void handle_jpg() {
     // 1. Initialize camera for high-res UXGA
-    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 1) != ESP_OK) {
+    if(init_camera(FRAMESIZE_UXGA, current_capture_quality, 3) != ESP_OK) {
         server.send(500, "text/plain", "Capture camera init failed");
         return;
     }
@@ -389,59 +397,111 @@ String getMotorControls() {
     return html;
 }
 
+
+
+
+
+
 void handle_capture_page() {
-    String html = "<html><head><style>";
-    // Layout CSS
-    html += "body { font-family: sans-serif; text-align: center; }";
-    html += ".control-panel { display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap; margin: 20px 0; }";
-    html += ".dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; }";
-    html += ".camera-settings { display: flex; flex-direction: column; gap: 8px; text-align: left; border-left: 2px solid #ddd; padding-left: 20px; }";
-    html += "button { padding: 12px; font-weight: bold; cursor: pointer; min-width: 55px; border-radius: 8px; border: 1px solid #ccc; }";
-    html += ".action-btn { background: #fff3cd; width: 100%; }";
-    html += "</style></head><body>";
+    // CRITICAL: Stop the camera before doing anything else
+    esp_camera_deinit(); 
+    delay(50); // Small breath for the hardware
 
-    html += "<h1>ESP32-S3 Capture</h1>";
+    // Re-init for High Res
+    if(init_camera(FRAMESIZE_UXGA, 4, 3) != ESP_OK) {
+        server.send(500, "text/plain", "Camera Init Failed");
+        return;
+    }
 
-    // Main UI Row
-    html += "<div class='control-panel'>";
-    
-    // Left: Motors
-    html += getMotorControls();
+    String motorControls = getMotorControls();
+    String qualityStr = String(current_capture_quality);
+    String timestamp = String(millis());
 
-    // Right: Camera Controls
-    html += "  <div class='camera-settings'>";
-    html += "    <button class='action-btn' onclick=\"refreshImage()\">CAPTURE NEW</button>";
-    html += "    <div>Quality: <span id='q'>" + String(current_capture_quality) + "</span>";
-    html += "      <button onclick=\"changeQuality('better')\">+ better</button>";
-    html += "      <button onclick=\"changeQuality('less')\">- less</button>";
-    html += "    </div>";
-    html += "    <button id='emailBtn' onclick=\"sendEmail()\" style='background:#d1e7ff'>Send Email</button>";
-    html += "    <span id='status' style='font-size: 0.8em;'></span>";
-    html += "  </div>";
-    
-    html += "</div>"; // End control-panel
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f9f9f9; }
+        .control-panel { display: flex; justify-content: center; align-items: stretch; gap: 20px; flex-wrap: wrap; margin: 20px auto; max-width: 900px; }
+        .dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; }
+        .camera-settings, .nav-panel { display: flex; flex-direction: column; gap: 10px; text-align: left; border-left: 2px solid #ddd; padding-left: 20px; justify-content: center; }
+        button { padding: 12px; font-weight: bold; cursor: pointer; min-width: 60px; border-radius: 8px; border: 1px solid #ccc; }
+        .action-btn { background: #fff3cd; width: 100%; }
+    </style>
+</head>
+<body>
+    <h1>ESP32-S3 Capture</h1>
+    <div class='control-panel'>
+        <div>
+            <h4 style='margin:0 0 10px 0;'>Movement</h4>
+            %MOTORS%
+        </div>
 
-    html += "<p><a href='/back'>[ Back to Menu ]</a></p>";
+        <div class='camera-settings'>
+            <h4 style='margin:0 0 10px 0;'>Capture Settings</h4>
+            <button class='action-btn' onclick="refreshImage()">CAPTURE NEW</button>
+            <div>Quality: <span id='q'>%QUAL%</span><br>
+                <button onclick="changeQuality('better')">+ better</button>
+                <button onclick="changeQuality('less')">- less</button>
+            </div>
+            <button id='emailBtn' onclick="sendEmail()" style='background:#d1e7ff'>Send Email</button>
+            <span id='status' style='font-size: 0.8em;'></span>
+        </div>
 
-    html += "<button onclick=\"location.href='/stream'\" style=\"background:#c8e6c9;\">BACK TO LIVE STREAM </button>";
-    html += "<img id=\"photo\" src=\"/last_buffer.jpg?ts=" + String(millis()) + "\" style=\"max-width:95%; border:2px solid #333;\">";
-    // JavaScript
-    html += "<script>";
-    html += "function go(dir){ fetch('/move?dir=' + dir); }";
-    html += "function refreshImage(){ const img=document.getElementById('photo'); img.src='/capture.jpg?ts='+new Date().getTime(); img.style.display = 'inline-block';}";
-    html += "function changeQuality(dir){ fetch('/quality?dir='+dir).then(r=>r.json()).then(d=>{document.getElementById('q').innerText=d.quality; refreshImage();}); }";
-    
-    // Email Function
-    html += "function sendEmail() {";
-    html += "  const btn = document.getElementById('emailBtn'); const status = document.getElementById('status');";
-    html += "  btn.disabled = true; status.innerText = '...sending...'; status.style.color = 'orange';";
-    html += "  fetch('/send_email').then(r => r.ok ? (status.innerText='Sent', status.style.color='green') : r.text().then(t=>(status.innerText='Error '+t, status.style.color='red')))";
-    html += "  .catch(e => status.innerText = 'Error').finally(() => btn.disabled = false);";
-    html += "}";
-    html += "</script></body></html>";
+        <div class='nav-panel'>
+            <h4 style='margin:0 0 10px 0;'>Navigation</h4>
+            <button onclick="prepExit('/stream')" style="background:#c8e6c9;">LIVE STREAM</button>
+            <button onclick="prepExit('/back')" style="background:#ffcdd2;">BACK TO MENU</button>
+        </div>
+    </div>
 
-    server.send(200, "text/html", html);
+    <div style='margin-top: 20px;'>
+        <img id="photo" src="/last_buffer.jpg?ts=%TS%" style="max-width:95%; border:3px solid #333; border-radius:10px;">
+    </div>
+
+    <script>
+        // CRITICAL: Tells the ESP32 to release UXGA settings before moving
+        function prepExit(url) {
+            document.body.style.opacity = '0.5';
+            document.body.style.pointerEvents = 'none';
+            // Optional: call a 'reset' route if you have one, or just redirect
+            window.location.href = url;
+        }
+
+        function go(dir){ fetch('/move?dir=' + dir); }
+        
+        function refreshImage(){ 
+            const img=document.getElementById('photo'); 
+            img.src='/capture.jpg?ts='+new Date().getTime(); 
+        }
+        
+        function changeQuality(dir){ 
+            fetch('/quality?dir='+dir).then(r=>r.json()).then(d=>{
+                document.getElementById('q').innerText=d.quality; 
+                refreshImage();
+            }); 
+        }
+        
+        function sendEmail() {
+            const btn = document.getElementById('emailBtn'); const status = document.getElementById('status');
+            btn.disabled = true; status.innerText = '...sending...'; status.style.color = 'orange';
+            fetch('/send_email').then(r => r.ok ? (status.innerText='Sent', status.style.color='green') : r.text().then(t=>(status.innerText='Error '+t, status.style.color='red')))
+            .catch(e => status.innerText = 'Error').finally(() => btn.disabled = false);
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+
+    html.replace("%MOTORS%", motorControls);
+    html.replace("%QUAL%", qualityStr);
+    html.replace("%TS%", timestamp);
+
+    server.send(200, "text/html", html); 
 }
+
+
 
 
 
@@ -477,71 +537,147 @@ void handle_quality_change() {
     server.send(200, "application/json", String("{\"quality\":") + String(current_capture_quality) + String("}"));
 }
 
+
+
+
+
+
+
+
+
 void handle_stream_page() {
-    String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-    html += "<style>";
-    html += "  body { font-family: sans-serif; text-align: center; background: #f4f4f4; margin: 0; padding: 10px; }";
-    html += "  .main-container { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 20px; margin-top: 10px; }";
-    html += "  .video-pane { flex: 1; min-width: 320px; max-width: 800px; }";
-    html += "  .video-pane img { width: 100%; border: 3px solid #333; border-radius: 8px; background: #000; }";
-    html += "  .side-panel { width: 300px; display: flex; flex-direction: column; gap: 15px; background: #fff; padding: 15px; border-radius: 10px; shadow: 0 4px 6px rgba(0,0,0,0.1); }";
-    html += "  .dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; justify-content: center; }";
-    html += "  button { padding: 12px; font-weight: bold; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: #eee; }";
-    html += "  .stream-opt { font-size: 0.9em; color: #555; text-align: left; }";
-    html += "  .nav-link { margin-top: 10px; display: block; color: #666; text-decoration: none; }";
-    html += "</style></head><body>";
-
-    html += "<h2>ESP32-S3 Live Stream</h2>";
-
-    html += "<div class='main-container'>";
+    // CRITICAL: Stop the camera before doing anything else
+    esp_camera_deinit(); 
+    delay(50); // Small breath for the hardware
     
-    // LEFT SIDE: Video
-    html += "  <div class='video-pane'>";
-    html += "    <img src='/stream.mjpg' id='streamView'>";
-    html += "  </div>";
+    // Re-init for High Res
+    if(init_camera(FRAMESIZE_QVGA, 45, 3) != ESP_OK) {
+        server.send(500, "text/plain", "Camera Init Failed");
+        return;
+    }
 
-    // RIGHT SIDE: Controls
-    html += "  <div class='side-panel'>";
-    
-    // Motor Controls (The D-Pad)
-    html += "    <div style='border-bottom: 1px solid #eee; padding-bottom: 15px;'>";
-    html += "      <h4 style='margin:0 0 10px 0;'>Movement</h4>";
-    html +=        getMotorControls(); 
-    html += "    </div>";
+    // 1. Prepare the dynamic variables first
+    String motorControls = getMotorControls();
+    String fsName = String(stream_framesize_names[stream_framesize_index]);
+    String fbCount = String(current_stream_fb_count);
 
-    // Stream Settings
-    html += "    <div class='stream-opt'>";
-    html += "      <h4 style='margin:0 0 10px 0;'>Stream Settings</h4>";
-    html += "      <p>Size: <b id='fs'>" + String(stream_framesize_names[stream_framesize_index]) + "</b></p>";
-    html += "      <button onclick=\"updateStream('framesize','down')\">&#9664;</button>";
-    html += "      <button onclick=\"updateStream('framesize','up')\">&#9654;</button>";
-    html += "      <p>Buffer (FB): <b id='fb'>" + String(current_stream_fb_count) + "</b></p>";
-    html += "      <button onclick=\"updateStream('fb_count','1')\">FB:1</button>";
-    html += "      <button onclick=\"updateStream('fb_count','2')\">FB:2</button>";
-    html += "    </div>";
+    // 2. Use ONE giant Raw String with %PLACEHOLDERS%
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f4f4f4; margin: 0; padding: 10px; }
+        .main-container { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 20px; margin-top: 10px; }
+        .video-pane { flex: 1; min-width: 320px; max-width: 800px; }
+        .video-pane img { width: 100%; border: 3px solid #333; border-radius: 8px; background: #000; }
+        .side-panel { width: 300px; display: flex; flex-direction: column; gap: 12px; background: #fff; padding: 15px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .dpad { display: grid; grid-template-areas: '. up .' 'left stop right' '. down .'; gap: 5px; justify-content: center; }
+        button { padding: 12px; font-weight: bold; cursor: pointer; border-radius: 6px; border: 1px solid #ccc; background: #eee; }
+        .capture-btn { background: #28a745; color: white; border: none; padding: 15px; font-size: 16px; width: 100%; }
+        .capture-btn:disabled { background: #6c757d; cursor: wait; }
+        .stream-opt { font-size: 0.9em; color: #555; text-align: left; border-top: 1px solid #eee; padding-top: 10px; }
+        .nav-group { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h2>ESP32-S3 Live Stream</h2>
+    <div class='main-container'>
+        <div class='video-pane'>
+            <img src='/stream.mjpg' id='streamView'>
+            <div id='statusMsg' style='margin-top:10px; font-weight:bold; color:#555;'>Mode: Streaming</div>
+        </div>
+        <div class='side-panel'>
+            <div>
+                <h4 style='margin:0 0 10px 0;'>Quick Action</h4>
+                <button id='capBtn' class='capture-btn' onclick='takeSnapshot()'>SNAP HIGH-RES (UXGA)</button>
+                <div id='capLink' style='font-size:0.85em; margin-top:5px;'></div>
+            </div>
+            <div style='border-top: 1px solid #eee; padding-top: 10px;'>
+                <h4 style='margin:0 0 10px 0;'>Movement</h4>
+                %MOTORS%
+            </div>
+            <div class='stream-opt'>
+                <p>Size: <b>%FS%</b> | Buffer: <b>%FB%</b></p>
+                <button onclick="updateStream('framesize','down')">&#9664;</button>
+                <button onclick="updateStream('framesize','up')">&#9654;</button>
+                <button onclick="updateStream('fb_count','1')">FB:1</button>
+                <button onclick="updateStream('fb_count','2')">FB:2</button>
+                <button onclick="updateStream('fb_count','3')">FB:3</button>
+            </div>
+            <div class='nav-group'>
+                <button onclick="cleanExit('/capture')" style="background:#c8e6c9;">DETAILED CAPTURE PAGE</button>
+                <button onclick="cleanExit('/back')" style="background:#ffcdd2;">EXIT TO MENU</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        // The "Kill Switch" for the MJPEG Stream
+        function cleanExit(targetUrl) {
+            const view = document.getElementById('streamView');
+            const status = document.getElementById('statusMsg');
+            if(status) status.innerText = 'CLOSING CONNECTION...';
+            
+            view.src = '';    // Break the socket
+            window.stop();    // Cancel all pending network requests
+            
+            setTimeout(() => { 
+                window.location.href = targetUrl; 
+            }, 150);
+        }
 
-    html += "<button onclick=\"location.href='/capture'\" style=\"background:#ffeb3b; padding:15px; font-weight:bold;\">GO TO UXGA CAPTURE</button>";
-    html += "<p><a href='/back'>[ Back to Menu ]</a></p>";
-    html += "  </div>"; // End side-panel
-    html += "</div>";   // End main-container
+        function takeSnapshot() {
+            const btn = document.getElementById('capBtn');
+            const view = document.getElementById('streamView');
+            const status = document.getElementById('statusMsg');
+            btn.disabled = true;
+            status.innerText = 'PAUSING STREAM...';
+            view.src = ''; 
+            
+            setTimeout(() => {
+                status.innerText = 'CAPTURING UXGA...';
+                fetch('/capture.jpg').then(r => {
+                    if(r.ok) {
+                        status.innerText = 'SUCCESS!';
+                        document.getElementById('capLink').innerHTML = '<a href="/last_buffer.jpg" target="_blank">View Photo</a>';
+                    }
+                }).finally(() => {
+                    setTimeout(() => { 
+                        view.src = '/stream.mjpg'; 
+                        btn.disabled = false; 
+                        status.innerText = 'Mode: Streaming'; 
+                    }, 1500);
+                });
+            }, 400);
+        }
 
-    // JavaScript for AJAX updates (No reload!)
-    html += "<script>";
-    html += "function go(dir){ fetch('/move?dir=' + dir); }";
-    html += "function updateStream(action, value){ ";
-    html += "  let url = '/stream_ctrl?action=' + action + (action==='framesize' ? '&dir=' : '&value=') + value;";
-    html += "  fetch(url).then(() => {";
-    html += "    if(action==='framesize') location.reload();"; // Resolution change usually needs a reconnect
-    html += "    else fetch(location.href).then(r=>r.text()).then(h=>{";
-    html += "      let parser = new DOMParser(); let doc = parser.parseFromString(h, 'text/html');";
-    html += "      document.getElementById('fb').innerText = doc.getElementById('fb').innerText;";
-    html += "    });";
-    html += "  });";
-    html += "}";
-    html += "</script></body></html>";
+        function go(dir){ fetch('/move?dir=' + dir); }
+        
+        function updateStream(a, v){ 
+            fetch('/stream_ctrl?action='+a+'&value='+v+'&dir='+v).then(() => { 
+                if(a === 'framesize') location.reload();
+            });
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
 
+    // 3. Swap the placeholders with actual data
+    html.replace("%MOTORS%", motorControls);
+    html.replace("%FS%", fsName);
+    html.replace("%FB%", fbCount);
+
+    // 4. Send the cleaned-up string
     server.send(200, "text/html", html);
 }
+
+
+
+
+
+
 
 void handle_stream_ctrl() {
     String action = server.arg("action");
@@ -612,19 +748,26 @@ void stop_motors() {
 
 
 void handle_move() {
-    if (server.hasArg("dir")) {
-        String direction = server.arg("dir");
-        
-        if (direction == "forward")         handle_forward();
-        else if (direction == "backward")  handle_backward();
-        else if (direction == "left")  handle_left();
-        else if (direction == "right") handle_right();
-        else if (direction == "stop")  stop_motors();
-        
-        server.send(200, "text/plain", "OK: " + direction);
-    } else {
+    if (!server.hasArg("dir")) {
         server.send(400, "text/plain", "Missing dir");
+        return;
     }
+
+    String direction = server.arg("dir");
+
+    if (direction == "forward") {
+        stepper1.move(2000);
+    } else if (direction == "backward") {
+        stepper1.move(-2000);
+    } else if (direction == "left") {
+        stepper2.move(2000);
+    } else if (direction == "right") {
+        stepper2.move(-2000);
+    } else if (direction == "stop") {
+        stop_motors();
+    }
+
+    server.send(200, "text/plain", "OK: " + direction);
 }
 
 
@@ -659,7 +802,7 @@ void setup() {
     }
 
     // Attempt to initialize camera until success
-    while (init_camera(stream_framesizes[stream_framesize_index], 25, current_stream_fb_count) != ESP_OK) {
+    while (init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) {
         Serial.println("Camera failed to initialize! Retrying in 1 second...");
         delay(1000);  // wait a bit before retry
     }
@@ -717,20 +860,11 @@ void loop() {
     stepper1.run();
     stepper2.run();
     
-    /*
-    stepperOne.step(204);
-    delay(100);
-    stepperTwo.step(204);
-    delay(100);
-    stepperOne.step(-204);
-    delay(100);
-    stepperTwo.step(-204);
-    delay(100);
-    */
-
     // Periodic Heartbeat Log
     if (millis() - lastLogTime >= logInterval) {
         lastLogTime = millis();
+
+        
         
         if (WiFi.status() == WL_CONNECTED) {
             Serial.print("[LOG] IP: ");

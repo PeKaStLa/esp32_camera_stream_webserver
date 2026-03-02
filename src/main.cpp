@@ -9,13 +9,17 @@
 #include <Stepper.h>
 #include <AccelStepper.h>
 
+#include "FS.h"
+#include "SPI.h"
+#include "SD_MMC.h"
+
 static const char* TAG = "camera";
 
-#define MAX_UXGA_SIZE (1024 * 1024) // 1MB Buffer
-uint8_t* last_photo_buf = nullptr;
-size_t last_photo_len = 0;
-
-
+// Circular Buffer for last 10 images
+#define BUFFER_SIZE 10
+uint8_t* photoBuffer[BUFFER_SIZE];
+size_t photoLen[BUFFER_SIZE];
+int bufferIndex = 0;
 
 // ------------------- SERVER -------------------
 WebServer server(80);
@@ -23,7 +27,7 @@ WebServer server(80);
 
 // initialize the stepper library on pins 8 through 11:
 AccelStepper stepper1(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
-AccelStepper stepper2(AccelStepper::FULL4WIRE, 47, 38, 21, 39);
+AccelStepper stepper2(AccelStepper::FULL4WIRE, 47, 40, 21, 39);
 
 
 void handle_show_last_photo() {
@@ -54,6 +58,20 @@ String base64_encode(const uint8_t* data, size_t len) {
     free(encoded);
     return result;
 }
+
+
+/*
+// Common ESP32-S3 SD SPI Pins
+#define SD_MOSI 14 
+#define SD_MISO 48 
+#define SD_SCLK 45 
+#define SD_CS   46
+*/
+
+// Standard 4D Systems S3 SDMMC Pin Mapping
+#define SD_MMC_CLK 39
+#define SD_MMC_CMD 38
+#define SD_MMC_D0  40
 
 // -------------------- PIN MAP --------------------
 // 4D Systems ESP32-S3 Gen4 (adjust if needed)
@@ -152,6 +170,8 @@ esp_err_t init_camera(framesize_t frame_size, int jpeg_quality, int fb_count) {
     return ESP_OK;
 }
 
+
+
 // ----------------- STREAM -----------------
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
@@ -244,37 +264,79 @@ void handle_jpg() {
         return;
     }
 
-    // 3. Update the global PSRAM buffer for the "Reload" feature
-    // We yield here to let background WiFi tasks breathe before the big copy
+    // 1. Check if SD is still mounted
+    if (!SD_MMC.cardSize()) {
+        Serial.println("SD Lost! Attempting Re-mount...");
+        SD_MMC.end(); 
+        delay(100);
+        SD_MMC.begin("/sdcard", true, false, 20000); // 10MHz for stability
+    }
+
+    // 2. Add a tiny delay to let the Camera power stabilize
+    delay(100); 
+
+    // 1. Generate filename based on current uptime (milliseconds)
+    // Format: /img_123456.jpg
+    // Change your save logic in handle_jpg to this:
+    unsigned long uptime = millis();
+    char path[32];
+    // %010lu ensures the strings are always 10 characters: 0000001234
+    sprintf(path, "/img_%010lu.jpg", uptime);
+
+    // 2. Save to SD_MMC
+    File file = SD_MMC.open(path, FILE_WRITE);
+    if (file) {
+        file.write(fb->buf, fb->len);
+
+        /* 
+
+        SUPER SLOW WRITING:
+        // Write in chunks of 1024 bytes instead of one giant burst
+    // This is MUCH easier on the voltage regulator
+
+
+    size_t fb_len = fb->len;
+    size_t written = 0;
+    const size_t chunkSize = 1024;
+    
+    while (written < fb_len) {
+        size_t toWrite = (fb_len - written > chunkSize) ? chunkSize : (fb_len - written);
+        file.write(fb->buf + written, toWrite);
+        written += toWrite;
+        yield(); // Let the background WiFi tasks breathe
+    }
+        
+    */
+        file.close();
+        Serial.printf("Saved: %s\n", path);
+    } else {
+        Serial.println("Failed to open file for writing - Card Error!");
+    }
+   
+    // ------------------------------------------
+    // 3. Update the global PSRAM buffer
     yield(); 
     if (fb->len <= MAX_UXGA_SIZE && last_photo_buf != nullptr) {
         memcpy(last_photo_buf, fb->buf, fb->len);
         last_photo_len = fb->len;
     }
 
-    // 4. Send the headers manually to avoid "Multiple Content-Length" errors
+    // 4. Send the headers manually
     server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
     server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.setContentLength(fb->len); // Crucial for large UXGA files
-    
-    // Send 200 OK with the Type, but an empty body string 
-    // to prevent the library from adding its own length.
+    server.setContentLength(fb->len);
     server.send(200, "image/jpeg", "");
 
     // 5. Stream the actual bytes
-    // Using sendContent_P is safer than client.write for large files 
-    // because it handles the TCP windowing for you.
     server.sendContent_P((const char *)fb->buf, fb->len);
 
     // 6. Release the hardware buffer
     esp_camera_fb_return(fb);
 
-    // 7. Optional: Pulse motors one last time after the heavy lifting
+    // 7. Pulse motors
     stepper1.run();
     stepper2.run();
 }
-
-
 
 
 
@@ -445,8 +507,6 @@ void handle_capture_page() {
                 <button onclick="changeQuality('better')">+ better</button>
                 <button onclick="changeQuality('less')">- less</button>
             </div>
-            <button id='emailBtn' onclick="sendEmail()" style='background:#d1e7ff'>Send Email</button>
-            <span id='status' style='font-size: 0.8em;'></span>
         </div>
 
         <div class='nav-panel'>
@@ -482,13 +542,7 @@ void handle_capture_page() {
                 refreshImage();
             }); 
         }
-        
-        function sendEmail() {
-            const btn = document.getElementById('emailBtn'); const status = document.getElementById('status');
-            btn.disabled = true; status.innerText = '...sending...'; status.style.color = 'orange';
-            fetch('/send_email').then(r => r.ok ? (status.innerText='Sent', status.style.color='green') : r.text().then(t=>(status.innerText='Error '+t, status.style.color='red')))
-            .catch(e => status.innerText = 'Error').finally(() => btn.disabled = false);
-        }
+    
     </script>
 </body>
 </html>
@@ -504,19 +558,53 @@ void handle_capture_page() {
 
 
 
-
 void handle_send_email() {
-    if (last_photo_buf == nullptr || last_photo_len == 0) {
-        server.send(400, "text/plain", "No photo captured yet! Please click Capture New first.");
+    // 1. Check if the gallery sent a specific path
+    if (!server.hasArg("path")) {
+        server.send(400, "text/plain", "Missing image path!");
         return;
     }
+    String path = server.arg("path");
+
+    // 2. Open the file from SD_MMC
+    File file = SD_MMC.open(path, FILE_READ);
+    if (!file) {
+        server.send(404, "text/plain", "File not found on SD card.");
+        return;
+    }
+
+    size_t fileSize = file.size();
     
-    // We create a "fake" fb structure to pass to your email function
-    // or simply modify your email function to accept raw buffer + len
-    bool ok = send_email_from_buffer(smtp_to, last_photo_buf, last_photo_len);
+    // 3. Allocate space in PSRAM (N16R8 has 8MB, so this is safe)
+    // We use ps_malloc to ensure we don't eat up the limited internal SRAM
+    uint8_t* temp_buf = (uint8_t*)ps_malloc(fileSize);
     
-    server.send(ok ? 200 : 500, "text/plain", ok ? "Email sent" : "Email send failed");
+    if (temp_buf == nullptr) {
+        file.close();
+        server.send(500, "text/plain", "System Memory Full: PSRAM Allocation Failed");
+        return;
+    }
+
+    // 4. Read the SD file into our PSRAM buffer
+    file.read(temp_buf, fileSize);
+    file.close();
+
+    Serial.printf("[Gallery] Sending %s (%d bytes) via Email...\n", path.c_str(), fileSize);
+
+    // 5. Call your existing optimized function
+    // Pass the buffer we just loaded from the SD card
+    bool ok = send_email_from_buffer(smtp_to, temp_buf, fileSize);
+
+    // 6. FREE the PSRAM memory immediately after sending
+    free(temp_buf);
+
+    if (ok) {
+        server.send(200, "text/plain", "Email sent successfully!");
+    } else {
+        server.send(500, "text/plain", "SMTP server rejected the email.");
+    }
 }
+
 
 void handle_quality_change() {
     // Change current_capture_quality using capture_qualities array
@@ -699,14 +787,62 @@ void handle_stream_ctrl() {
     server.send(400, "text/plain", "Bad Request");
 }
 
-
 // ----------------- WEB -----------------
 void handle_root() {
-    String html = "<h1>ESP32-S3 Gen4 Camera</h1>";
-    html += "<p><a href='/capture'>Take High-Res Photo</a></p>";
-    html += "<p><a href='/stream'>View 5 FPS Live Stream</a></p>";
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-S3 Camera</title>
+<style>
+body {
+    font-family: sans-serif; 
+    text-align: center; 
+    background: #f4f4f4; 
+    margin: 0; 
+    padding: 20px;
+}
+h1 {
+    font-size: 1.4rem; 
+    margin-bottom: 20px;
+}
+.nav-group {
+    display: flex; 
+    flex-direction: column;   /* stack vertically */
+    align-items: center;      /* center buttons horizontally */
+    gap: 12px; 
+}
+.nav-group a {
+    display: inline-block; 
+    padding: 12px 18px; 
+    font-size: 1rem; 
+    color: white; 
+    text-decoration: none; 
+    border-radius: 6px; 
+    background: #28a745; 
+    transition: background 0.2s;
+}
+.nav-group a:hover {
+    background: #218838;
+}
+</style>
+</head>
+<body>
+<h1>ESP32-S3 Gen4 Camera</h1>
+<div class="nav-group">
+    <a href='/capture'>Take High-Res Photo</a>
+    <a href='/stream'>View 5 FPS Live Stream</a>
+    <a href='/gallery'>View Gallery</a>
+    <a href='/sdtest'>sdtest</a> 
+</div> 
+</body>
+</html>
+)rawliteral";
     server.send(200, "text/html", html);
 }
+
 
 void handle_NotFound() {
     server.send(404, "text/plain", "Not Found");
@@ -772,6 +908,197 @@ void handle_move() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void handle_gallery() {
+    int page = 0; 
+    if (server.hasArg("page")) page = server.arg("page").toInt();
+    
+    // Change to 15 images
+    const int itemsPerPage = 15;
+    int skipCount = page * itemsPerPage;
+
+    // Array size must match itemsPerPage
+    String pageFiles[15]; 
+    int totalJpgs = 0;
+    int storedInPage = 0;
+
+    String html = "<html><head><title>S3 Gallery</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:sans-serif;text-align:center;background:#1a1a1a;color:white;}"
+            ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:15px;padding:20px;}"
+            "img{width:100%;border-radius:8px;height:180px;object-fit:cover;cursor:pointer;}"
+            ".nav-bar{margin:20px 0;display:flex;justify-content:center;gap:10px;}"
+            ".nav-btn{background:#00afff;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}"
+            ".nav-btn:disabled{background:#444;color:#888;cursor:not-allowed;}</style></head><body>";
+    
+    html += "<div style='padding:10px;'>";
+    html += "<button onclick=\"cleanExit('/stream')\" style=\"background:#c8e6c9; border:none; padding:10px; border-radius:5px; margin:5px; cursor:pointer;\">LIVE STREAM</button>";
+    html += "<button onclick=\"cleanExit('/')\" style=\"background:#ffcdd2; border:none; padding:10px; border-radius:5px; margin:5px; cursor:pointer;\">BACK TO MENU</button>";
+    html += "</div>";
+    
+    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1><div class='grid'>";
+
+    File root = SD_MMC.open("/");
+    if (!root) {
+        server.send(500, "text/plain", "SD Card Error");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while(file) {
+        String name = String(file.name());
+        if(name.endsWith(".jpg") || name.endsWith(".JPG")) {
+            // Logic to capture only the 15 images for the current page
+            if (totalJpgs >= skipCount && storedInPage < itemsPerPage) {
+                String fixedPath = name.startsWith("/") ? name : "/" + name;
+                pageFiles[storedInPage] = fixedPath;
+                storedInPage++;
+            }
+            totalJpgs++; 
+        }
+        file.close(); 
+        file = root.openNextFile();
+    }
+    root.close();
+
+    for (int i = 0; i < storedInPage; i++) {
+        html += "<div><a href='/saved_file?path=" + pageFiles[i] + "' target='_blank'>";
+        html += "<img src='/saved_file?path=" + pageFiles[i] + "' loading='lazy'></a>";
+        html += "<p style='font-size:10px;'>" + pageFiles[i].substring(1) + "</p>";
+        html += "<button onclick=\"sendMail('" + pageFiles[i] + "', this)\" style='width:100%; cursor:pointer; background:#4CAF50; color:white; border:none; padding:5px; border-radius:3px;'>send via Email</button></div>";
+    }
+
+    if(storedInPage == 0 && totalJpgs > 0) {
+        html += "<p>No images found on this page. Total images: " + String(totalJpgs) + "</p>";
+    } else if (totalJpgs == 0) {
+        html += "<p>SD card is empty or failed to read.</p>";
+    }
+    
+    html += "</div>";
+
+    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
+    html += "<div class='nav-bar'>";
+    
+    // Previous Button logic
+    if (page > 0) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; BEFORE</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
+    }
+
+    // Next Button logic
+    if (totalJpgs > (skipCount + itemsPerPage)) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">NEXT &rarr;</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
+    }
+    
+    html += "</div>";
+
+    html += "<script>";
+    html += "function sendMail(p, b) {";
+    html += "  b.innerText='Sending...'; b.disabled=true;";
+    html += "  fetch('/send_email?path='+p).then(r => {";
+    html += "    if(r.ok) { b.innerText='Sent!'; b.style.background='#2e7d32'; }";
+    html += "    else { b.innerText='Error'; b.style.background='#c62828'; }";
+    html += "    setTimeout(() => { b.disabled=false; b.innerText='Email'; b.style.background='#4CAF50'; }, 3000);";
+    html += "  }).catch(() => { b.innerText='Failed'; b.disabled=false; });";
+    html += "}";
+
+    html += "function cleanExit(targetUrl) {";
+    html += "  window.stop();"; 
+    html += "  window.location.href = targetUrl;";
+    html += "}";
+    html += "</script></body></html>";
+
+    server.send(200, "text/html", html);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+void verifySD() {
+    File file = SD_MMC.open("/boot_log.txt", FILE_WRITE);
+    if(file) {
+        file.println("System rebooted successfully.");
+        file.close();
+        Serial.println("Verified: SD is writable.");
+    }
+}
+
+
+void handle_sd_test() {
+    String output = "SD CARD FILE LIST:\n";
+    output += "------------------\n";
+
+    File root = SD_MMC.open("/");
+    if (!root) {
+        server.send(500, "text/plain", "CRITICAL ERROR: Could not open SD Root");
+        return;
+    }
+
+    File file = root.openNextFile();
+    int count = 0;
+
+    while(file) {
+        output += "[" + String(count) + "] ";
+        if (file.isDirectory()) {
+            output += "DIR : " + String(file.name()) + "\n";
+        } else {
+            output += "FILE: " + String(file.name()) + " (" + String(file.size()) + " bytes)\n";
+        }
+        count++;
+        file.close();
+        file = root.openNextFile();
+    }
+    root.close();
+
+    if (count == 0) output += "No files found on card.";
+    
+    server.send(200, "text/plain", output);
+}
+
+void handle_saved_file() {
+    if (!server.hasArg("path")) {
+        server.send(400, "text/plain", "Missing Path");
+        return;
+    }
+    String path = server.arg("path");
+    
+    // Open the file from SD_MMC
+    File file = SD_MMC.open(path, FILE_READ);
+    if (!file) {
+        server.send(404, "text/plain", "File Not Found");
+        return;
+    }
+
+    // This streams the file directly to the browser
+    server.streamFile(file, "image/jpeg");
+    file.close();
+}
+
+
 // ------------------- ARDUINO -------------------
 void setup() {
     Serial.begin(115200);
@@ -780,8 +1107,30 @@ void setup() {
     Serial.println("\n--- BOOT ---");
     delay(900);
 
+
+
+
+
+    // Initialize ONCE here
+    // Initialize ONCE here
+    SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0
+    if (!SD_MMC.begin("/sdcard", true, false, 20000)) {
+        Serial.println("SDMMC Mount Failed!");
+    } else {
+        Serial.println("SDMMC Mount SUCCESS!");
+        // Now that it is mounted, you can call a simple test
+        verifySD(); 
+    }
+
+
+
+
+
+
+
+
     if (!psramFound()) {
-        Serial.println("❌ PSRAM NOT FOUND – CAMERA WILL NOT WORK");
+        Serial.println("PSRAM NOT FOUND - CAMERA WILL NOT WORK");
         while (true) {
             delay(1000);
         }
@@ -841,6 +1190,9 @@ void setup() {
     server.on("/send_email", handle_send_email);
     server.on("/move", handle_move);
     server.on("/back", handle_back_to_menu);
+    server.on("/gallery", handle_gallery);
+    server.on("/saved_file", handle_saved_file); 
+    server.on("/sdtest", handle_sd_test);   
     server.onNotFound(handle_NotFound);    // This stops the [E] handler not found error
 
     server.begin();

@@ -800,7 +800,7 @@ void handle_stream_page() {
                 <h4 style='margin:0 0 10px 0;'>Quick Action</h4>
                 <button id='capBtn' class='capture-btn' onclick='takeSnapshot()'>SNAP HIGH-RES (UXGA)</button>
                 <div id='capLink' style='font-size:0.85em; margin-top:5px;'></div>
-                <button id='emailBtn' style='display:none; margin-top:8px; width:100%; background:#4CAF50; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer;' onclick='emailLastPhoto()'>Email Last Photo</button>
+                <button id='emailBtn' style='display:none; margin-top:8px; width:100%; background:#4CAF50; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer;' onclick='emailLastPhoto()'>Email Last Photo(Klappt das hier oder nicht???)</button>
             </div>
             <div style='border-top: 1px solid #eee; padding-top: 10px;'>
                 <h4 style='margin:0 0 10px 0;'>Movement</h4>

@@ -1344,14 +1344,15 @@ void setup() {
     Serial.begin(115200);
     Serial.println("-- BOOT ---");
 
-    // 1. KICK OFF HOTSPOT ATTEMPT IMMEDIATELY (Non-blocking)
+    // DISCONNECT & CLEAN START
+    WiFi.disconnect(true); // Deletes saved credentials and stops any background tasks
+    delay(200);
+    WiFi.mode(WIFI_STA);
+    // KICK OFF HOTSPOT ATTEMPT IMMEDIATELY (Non-blocking)
     WiFi.begin(WIFI_SSID_HOTSPOT, WIFI_PASSWORD_HOTSPOT);
     WiFi.setSleep(false); 
 
-    // 2. DO OTHER WORK (This "masks" the connection time)
-    delay(900);
-    long start = millis();
-    while (!Serial && millis() - start < 2000) { delay(10); }
+    delay(200);
 
     for (int i = 0; i < BUFFER_SIZE; i++) {
         photo_buffer[i] = nullptr;
@@ -1392,7 +1393,10 @@ void setup() {
     }
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\nHotspot not found. Trying Home WLAN...");
-        WiFi.disconnect();
+        // CRITICAL: Stop the previous attempt fully before starting new one
+        WiFi.disconnect(true); // Deletes saved credentials and stops any background tasks
+        delay(200);
+
         WiFi.begin(WIFI_SSID_WLAN, WIFI_PASSWORD_WLAN);
         WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
         Serial.print("Connecting to WiFi");

@@ -1047,7 +1047,7 @@ void handle_gallery() {
     
     html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
     
-    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
+    
     html += "<div class='nav-bar'>";
     
     // Previous Button logic
@@ -1065,6 +1065,8 @@ void handle_gallery() {
     }
     
     html += "</div>";
+
+
     html += "<div class='grid'>";
 
     File root = SD_MMC.open("/");
@@ -1105,7 +1107,24 @@ void handle_gallery() {
     
     html += "</div>";
 
+    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
+    html += "<div class='nav-bar'>";
+    
+    // Previous Button logic
+    if (page > 0) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
+    }
 
+    // Next Button logic
+    if (totalJpgs > (skipCount + itemsPerPage)) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
+    }
+    
+    html += "</div>";
 
     html += "<script>";
     html += "function sendMail(p, b) {";

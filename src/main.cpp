@@ -15,35 +15,48 @@
 
 static const char* TAG = "camera";
 
-// Circular Buffer for last 10 images
 #define BUFFER_SIZE 10
-uint8_t* photoBuffer[BUFFER_SIZE];
-size_t photoLen[BUFFER_SIZE];
-int bufferIndex = 0;
+#define MAX_UXGA_SIZE (1024 * 1024) // 1MB per slot
+
+// Array of 10 pointers, all starting as null
+uint8_t* photo_buffer[BUFFER_SIZE] = { nullptr }; 
+size_t photo_lengths[BUFFER_SIZE] = { 0 };
+int current_buffer_idx = 0;
+int total_buffered = 0;
 
 // ------------------- SERVER -------------------
 WebServer server(80);
 
 
 // initialize the stepper library on pins 8 through 11:
-AccelStepper stepper1(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
-AccelStepper stepper2(AccelStepper::FULL4WIRE, 47, 40, 21, 39);
+AccelStepper stepper2(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
+AccelStepper stepper1(AccelStepper::FULL4WIRE, 47, 14, 21, 3);
+
+
 
 
 void handle_show_last_photo() {
-    if (last_photo_buf == nullptr || last_photo_len == 0) {
+    // Calculate the index of the most recent photo
+    // We subtract 1 from current_buffer_idx because the index moves forward AFTER saving
+    int lastIdx = (current_buffer_idx - 1 + BUFFER_SIZE) % BUFFER_SIZE;
+
+    if (total_buffered == 0 || photo_buffer[lastIdx] == nullptr) {
         server.send(404, "text/plain", "No image in buffer yet.");
         return;
     }
 
-    // Clear any previous headers to be safe
-    server.setContentLength(last_photo_len); 
+    size_t len = photo_lengths[lastIdx];
+    uint8_t* buf = photo_buffer[lastIdx];
+
+    server.setContentLength(len); 
     server.sendHeader("Content-Type", "image/jpeg");
     server.sendHeader("Access-Control-Allow-Origin", "*");
     
-    // Send the data sitting in your last_photo_buf
-    server.sendContent_P((const char *)last_photo_buf, last_photo_len);
+    // Send the data from the specific buffer slot
+    server.sendContent_P((const char *)buf, len);
 }
+
+
 
 // Base64 encoding helper
 String base64_encode(const uint8_t* data, size_t len) {
@@ -60,18 +73,8 @@ String base64_encode(const uint8_t* data, size_t len) {
 }
 
 
-/*
-// Common ESP32-S3 SD SPI Pins
-#define SD_MOSI 14 
-#define SD_MISO 48 
-#define SD_SCLK 45 
-#define SD_CS   46
-*/
 
-// Standard 4D Systems S3 SDMMC Pin Mapping
-#define SD_MMC_CLK 39
-#define SD_MMC_CMD 38
-#define SD_MMC_D0  40
+
 
 // -------------------- PIN MAP --------------------
 // 4D Systems ESP32-S3 Gen4 (adjust if needed)
@@ -116,7 +119,7 @@ camera_config_t camera_config_template = {
     .ledc_channel = LEDC_CHANNEL_0,
     .pixel_format = PIXFORMAT_JPEG,
     .frame_size = FRAMESIZE_QVGA, // QQVGA-UXGA, JPEG mode recommended, ?FRAMESIZE_VGA?
-    .jpeg_quality = 25,
+    .jpeg_quality = 35,
     .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY
@@ -131,7 +134,7 @@ const int capture_qualities_len = sizeof(capture_qualities) / sizeof(capture_qua
 framesize_t stream_framesizes[] = {FRAMESIZE_QVGA, FRAMESIZE_VGA, FRAMESIZE_SVGA, FRAMESIZE_XGA, FRAMESIZE_UXGA};
 const char* stream_framesize_names[] = {"QVGA", "VGA", "SVGA", "XGA", "UXGA"};
 const int stream_framesize_len = sizeof(stream_framesizes) / sizeof(stream_framesizes[0]);
-int stream_framesize_index = 0; // default VGA
+int stream_framesize_index = 0; // default qVGA
 int current_stream_fb_count = 3;
 
 
@@ -159,12 +162,61 @@ esp_err_t init_camera(framesize_t frame_size, int jpeg_quality, int fb_count) {
         digitalWrite(CAM_PIN_PWDN, LOW);
     }
 
-    esp_camera_deinit();
+    esp_camera_deinit(); 
+    delay(50);    
     esp_err_t err = esp_camera_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Camera Init Failed: 0x%x", err);
         return err;
     }
+
+    /*
+    sensor_t * s = esp_camera_sensor_get();
+    if (s) {
+        s->set_exposure_ctrl(s, 0); // Manual Exposure
+        s->set_aec_value(s, 800);   // Max Shutter (1200 is usually the limit)
+
+        s->set_gain_ctrl(s, 0);     // Manual Gain (Turn off Auto)
+        s->set_agc_gain(s, 15);      // Max Digital Boost (0 to 30)
+        
+        s->set_brightness(s, 2);     // Software offset: -2 to 2
+        s->set_ae_level(s, 2);       // Target brightness boost
+        s->set_dcw(s, 1);               // Digital Cleaning (helps with noise)
+    } */
+
+
+    /*
+
+   sensor_t * s = esp_camera_sensor_get();
+    if (s) {
+        // 1. Exposure & Gain (Keep these manual to stop stripes)
+        s->set_exposure_ctrl(s, 0); 
+        s->set_aec_value(s, 600);    // Dropped from 800 to 600 (Reduces brightness)
+        s->set_gain_ctrl(s, 0);
+        s->set_agc_gain(s, 10);      // Dropped from 15 to 10 (Reduces "yellow" noise)
+
+        // 2. The Color Fix (White Balance)
+        s->set_whitebal(s, 1);       // Enable Auto White Balance
+        s->set_awb_gain(s, 1);       // Enable White Balance Gain
+        s->set_wb_mode(s, 0);        // 0: Auto, 1: Sunny, 2: Cloudy, 3: Office, 4: Home
+        // If it's still yellow, try: s->set_wb_mode(s, 3); // "Office" mode cools down yellow light
+
+        // 3. Remove the Over-Processing
+        s->set_brightness(s, 0);     // Reset from 2 to 0 (This was causing the "washout")
+        s->set_ae_level(s, 0);       // Reset from 2 to 0 (Not needed when using manual exposure)
+        
+        s->set_dcw(s, 1);            // Keep Digital Cleaning ON
+        s->set_special_effect(s, 0); // Ensure no tint filters are active
+    }
+
+    */
+
+    // s->set_aec2(s, 1);              // Enable Auto Exposure Control 2
+    // s->set_agc_gain(s, 15);      // 3. Set a baseline Gain so it doesn't have to "guess"
+    // --- THE STRIPE FIX ---    
+    // s->set_antibanding(s, 1);       // 1 = 50Hz (Europe), 2 = 60Hz (USA)
+
+
 
     Serial.println("Camera initialized successfully!");
     return ESP_OK;
@@ -287,26 +339,6 @@ void handle_jpg() {
     File file = SD_MMC.open(path, FILE_WRITE);
     if (file) {
         file.write(fb->buf, fb->len);
-
-        /* 
-
-        SUPER SLOW WRITING:
-        // Write in chunks of 1024 bytes instead of one giant burst
-    // This is MUCH easier on the voltage regulator
-
-
-    size_t fb_len = fb->len;
-    size_t written = 0;
-    const size_t chunkSize = 1024;
-    
-    while (written < fb_len) {
-        size_t toWrite = (fb_len - written > chunkSize) ? chunkSize : (fb_len - written);
-        file.write(fb->buf + written, toWrite);
-        written += toWrite;
-        yield(); // Let the background WiFi tasks breathe
-    }
-        
-    */
         file.close();
         Serial.printf("Saved: %s\n", path);
     } else {
@@ -316,10 +348,37 @@ void handle_jpg() {
     // ------------------------------------------
     // 3. Update the global PSRAM buffer
     yield(); 
-    if (fb->len <= MAX_UXGA_SIZE && last_photo_buf != nullptr) {
-        memcpy(last_photo_buf, fb->buf, fb->len);
-        last_photo_len = fb->len;
+    
+
+    // 
+    // WRITE TO BUFFER
+    //
+    // 1. Check if the frame is within size limits
+    if (fb->len <= MAX_UXGA_SIZE) {
+    
+    // 2. Ensure the specific slot in our array is allocated in PSRAM
+    if (photo_buffer[current_buffer_idx] == nullptr) {
+        photo_buffer[current_buffer_idx] = (uint8_t*)ps_malloc(MAX_UXGA_SIZE);
     }
+
+    // 3. If allocation succeeded (or already existed), copy the data
+    if (photo_buffer[current_buffer_idx] != nullptr) {
+        memcpy(photo_buffer[current_buffer_idx], fb->buf, fb->len);
+        photo_lengths[current_buffer_idx] = fb->len;
+
+        Serial.printf("Saved to RAM Buffer slot: %d (%zu bytes)\n", current_buffer_idx, fb->len);
+
+        // 4. Advance the index for the NEXT photo (0 to 9, then back to 0)
+        current_buffer_idx = (current_buffer_idx + 1) % BUFFER_SIZE;
+        
+        // 5. Keep track of how many total images we've actually filled
+        if (total_buffered < BUFFER_SIZE) total_buffered++;
+    } else {
+        Serial.println("PSRAM Error: Could not allocate buffer slot!");
+    }
+} else {
+    Serial.println("Warning: Photo too large for 1MB buffer slot!");
+}
 
     // 4. Send the headers manually
     server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
@@ -557,46 +616,52 @@ void handle_capture_page() {
 
 
 
-
 void handle_send_email() {
-    // 1. Check if the gallery sent a specific path
-    if (!server.hasArg("path")) {
-        server.send(400, "text/plain", "Missing image path!");
-        return;
-    }
-    String path = server.arg("path");
+    uint8_t* temp_buf = nullptr;
+    size_t fileSize = 0;
+    String path = "";
 
-    // 2. Open the file from SD_MMC
-    File file = SD_MMC.open(path, FILE_READ);
-    if (!file) {
-        server.send(404, "text/plain", "File not found on SD card.");
-        return;
-    }
-
-    size_t fileSize = file.size();
-    
-    // 3. Allocate space in PSRAM (N16R8 has 8MB, so this is safe)
-    // We use ps_malloc to ensure we don't eat up the limited internal SRAM
-    uint8_t* temp_buf = (uint8_t*)ps_malloc(fileSize);
-    
-    if (temp_buf == nullptr) {
+    // 1. Check if we are sending from SD (Gallery) or RAM (Stream Button)
+    if (server.hasArg("path")) {
+        path = server.arg("path");
+        File file = SD_MMC.open(path, FILE_READ);
+        if (!file) {
+            server.send(404, "text/plain", "File not found on SD card.");
+            return;
+        }
+        fileSize = file.size();
+        temp_buf = (uint8_t*)ps_malloc(fileSize);
+        if (temp_buf) {
+            file.read(temp_buf, fileSize);
+        }
         file.close();
-        server.send(500, "text/plain", "System Memory Full: PSRAM Allocation Failed");
+        Serial.printf("[Gallery] Sending %s from SD via Email...\n", path.c_str());
+    } 
+    else {
+        // 2. No path? Send the LATEST photo from the RAM Circular Buffer
+        int lastIdx = (current_buffer_idx - 1 + BUFFER_SIZE) % BUFFER_SIZE;
+        
+        if (total_buffered > 0 && photo_buffer[lastIdx] != nullptr) {
+            fileSize = photo_lengths[lastIdx];
+            temp_buf = (uint8_t*)ps_malloc(fileSize); // Copy to temp so we don't block the buffer
+            if (temp_buf) {
+                memcpy(temp_buf, photo_buffer[lastIdx], fileSize);
+            }
+            Serial.println("[Stream] Sending latest RAM capture via Email...");
+        } else {
+            server.send(404, "text/plain", "No recent image in RAM buffer.");
+            return;
+        }
+    }
+
+    // 3. Final Check and Send
+    if (temp_buf == nullptr) {
+        server.send(500, "text/plain", "PSRAM Allocation Failed");
         return;
     }
 
-    // 4. Read the SD file into our PSRAM buffer
-    file.read(temp_buf, fileSize);
-    file.close();
-
-    Serial.printf("[Gallery] Sending %s (%d bytes) via Email...\n", path.c_str(), fileSize);
-
-    // 5. Call your existing optimized function
-    // Pass the buffer we just loaded from the SD card
     bool ok = send_email_from_buffer(smtp_to, temp_buf, fileSize);
-
-    // 6. FREE the PSRAM memory immediately after sending
-    free(temp_buf);
+    free(temp_buf); // Always free the temporary copy
 
     if (ok) {
         server.send(200, "text/plain", "Email sent successfully!");
@@ -604,6 +669,10 @@ void handle_send_email() {
         server.send(500, "text/plain", "SMTP server rejected the email.");
     }
 }
+
+
+
+
 
 
 void handle_quality_change() {
@@ -668,8 +737,7 @@ void handle_stream_page() {
         .stream-opt { font-size: 0.9em; color: #555; text-align: left; border-top: 1px solid #eee; padding-top: 10px; }
         .nav-group { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
     </style>
-</head>
-<body>
+</head><body>
     <h2>ESP32-S3 Live Stream</h2>
     <div class='main-container'>
         <div class='video-pane'>
@@ -681,6 +749,7 @@ void handle_stream_page() {
                 <h4 style='margin:0 0 10px 0;'>Quick Action</h4>
                 <button id='capBtn' class='capture-btn' onclick='takeSnapshot()'>SNAP HIGH-RES (UXGA)</button>
                 <div id='capLink' style='font-size:0.85em; margin-top:5px;'></div>
+                <button id='emailBtn' style='display:none; margin-top:8px; width:100%; background:#4CAF50; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer;' onclick='emailLastPhoto()'>📧 Email Last Photo</button>
             </div>
             <div style='border-top: 1px solid #eee; padding-top: 10px;'>
                 <h4 style='margin:0 0 10px 0;'>Movement</h4>
@@ -701,25 +770,23 @@ void handle_stream_page() {
         </div>
     </div>
     <script>
-        // The "Kill Switch" for the MJPEG Stream
         function cleanExit(targetUrl) {
             const view = document.getElementById('streamView');
             const status = document.getElementById('statusMsg');
             if(status) status.innerText = 'CLOSING CONNECTION...';
-            
-            view.src = '';    // Break the socket
-            window.stop();    // Cancel all pending network requests
-            
-            setTimeout(() => { 
-                window.location.href = targetUrl; 
-            }, 150);
+            view.src = '';
+            window.stop();
+            setTimeout(() => { window.location.href = targetUrl; }, 150);
         }
 
         function takeSnapshot() {
             const btn = document.getElementById('capBtn');
+            const emailBtn = document.getElementById('emailBtn'); // Reference new button
             const view = document.getElementById('streamView');
             const status = document.getElementById('statusMsg');
+            
             btn.disabled = true;
+            emailBtn.style.display = 'none'; // Hide email button during new capture
             status.innerText = 'PAUSING STREAM...';
             view.src = ''; 
             
@@ -729,6 +796,9 @@ void handle_stream_page() {
                     if(r.ok) {
                         status.innerText = 'SUCCESS!';
                         document.getElementById('capLink').innerHTML = '<a href="/last_buffer.jpg" target="_blank">View Photo</a>';
+                        emailBtn.style.display = 'block'; // Show email button after success
+                        emailBtn.innerText = '📧 Email Last Photo';
+                        emailBtn.style.background = '#4CAF50';
                     }
                 }).finally(() => {
                     setTimeout(() => { 
@@ -740,8 +810,34 @@ void handle_stream_page() {
             }, 400);
         }
 
+        // New Email Function
+        function emailLastPhoto() {
+            const eBtn = document.getElementById('emailBtn');
+            eBtn.innerText = 'Sending...';
+            eBtn.disabled = true;
+
+            // We call the send_email route. Since it's the "last" one, 
+            // your ESP32 handle_send_email logic should serve from the latest buffer slot.
+            fetch('/send_email').then(r => {
+                if(r.ok) {
+                    eBtn.innerText = '✅ Sent!';
+                    eBtn.style.background = '#2e7d32';
+                } else {
+                    eBtn.innerText = '❌ Error';
+                    eBtn.style.background = '#c62828';
+                }
+                setTimeout(() => { 
+                    eBtn.disabled = false; 
+                    eBtn.innerText = '📧 Email Last Photo'; 
+                    eBtn.style.background = '#4CAF50';
+                }, 3000);
+            }).catch(() => {
+                eBtn.innerText = '❌ Failed';
+                eBtn.disabled = false;
+            });
+        }
+
         function go(dir){ fetch('/move?dir=' + dir); }
-        
         function updateStream(a, v){ 
             fetch('/stream_ctrl?action='+a+'&value='+v+'&dir='+v).then(() => { 
                 if(a === 'framesize') location.reload();
@@ -1028,16 +1124,6 @@ void handle_gallery() {
 }
 
 
-
-
-
-
-
-
-
-
-
-
 void verifySD() {
     File file = SD_MMC.open("/boot_log.txt", FILE_WRITE);
     if(file) {
@@ -1102,18 +1188,22 @@ void handle_saved_file() {
 // ------------------- ARDUINO -------------------
 void setup() {
     Serial.begin(115200);
-    last_photo_buf = nullptr; // Initialize to empty
-    last_photo_len = 0;
+    
+    // This waits up to 3 seconds for you to open the Serial Monitor window
+    long start = millis();
+    while (!Serial && millis() - start < 9000) {
+        delay(10);
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+    photo_buffer[i] = nullptr;
+    photo_lengths[i] = 0;
+}
+
     Serial.println("\n--- BOOT ---");
     delay(900);
 
-
-
-
-
-    // Initialize ONCE here
-    // Initialize ONCE here
-    SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0
+    SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0 sdmmc_card_init failed (0x107).
     if (!SD_MMC.begin("/sdcard", true, false, 20000)) {
         Serial.println("SDMMC Mount Failed!");
     } else {
@@ -1122,25 +1212,14 @@ void setup() {
         verifySD(); 
     }
 
-
-
-
-
-
-
-
     if (!psramFound()) {
         Serial.println("PSRAM NOT FOUND - CAMERA WILL NOT WORK");
         while (true) {
             delay(1000);
         }
     }
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
 
-    // Allocate 1MB in PSRAM once and for all
-    last_photo_buf = (uint8_t*)ps_malloc(MAX_UXGA_SIZE);
-    if (last_photo_buf == nullptr) {
-        Serial.println("PSRAM Allocation Failed!");
-    }
 
     Serial.printf("✅ PSRAM OK: %d bytes\n", ESP.getPsramSize());
     Serial.printf("PSRAM: %s\n", psramFound() ? "OK" : "FAIL");
@@ -1150,13 +1229,7 @@ void setup() {
         delay(10);
     }
 
-    // Attempt to initialize camera until success
-    while (init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) {
-        Serial.println("Camera failed to initialize! Retrying in 1 second...");
-        delay(1000);  // wait a bit before retry
-    }
-
-    Serial.println("Camera initialized successfully!");
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
 
     WiFi.begin(ssid, password);
     WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
@@ -1169,9 +1242,14 @@ void setup() {
     Serial.print("WiFi connected! IP: ");
     Serial.println(WiFi.localIP());
 
-
-
-    //stepperOne.setSpeed(5); stepperTwo.setSpeed(5);
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+    // Attempt to initialize camera until success
+    while (init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) {
+        Serial.println("Camera failed to initialize! Retrying in 1 second...");
+        delay(1000);  // wait a bit before retry
+    }
+    Serial.println("Camera initialized successfully!");
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
     
     stepper1.setMaxSpeed(1000.0);
     stepper1.setAcceleration(500.0);
@@ -1197,6 +1275,8 @@ void setup() {
 
     server.begin();
     Serial.println("HTTP server started.");
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+
 }
 
 unsigned long lastLogTime = 0;

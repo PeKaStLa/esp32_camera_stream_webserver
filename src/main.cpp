@@ -940,8 +940,27 @@ h1 {
 }
 
 
+
 void handle_NotFound() {
-    server.send(404, "text/plain", "Not Found");
+    String path = server.uri();
+    
+    // Check if the request is for a file on the SD card
+    if (SD_MMC.exists(path)) {
+        File file = SD_MMC.open(path, "r");
+        if (file) {
+            String contentType = "application/octet-stream";
+            if (path.endsWith(".jpg")) contentType = "image/jpeg";
+            else if (path.endsWith(".txt")) contentType = "text/plain";
+            else if (path.endsWith(".html")) contentType = "text/html";
+            
+            server.streamFile(file, contentType);
+            file.close();
+            return; // Successfully served the file!
+        }
+    }
+
+    // If we get here, the file truly doesn't exist
+    server.send(404, "text/plain", "404: Not Found");
 }
 
 
@@ -1009,66 +1028,19 @@ void handle_move() {
 
 
 
-
-
-
-
-
-
-
-
-
 void handle_gallery() {
     int page = 0; 
     if (server.hasArg("page")) page = server.arg("page").toInt();
     
-    // Change to 15 images
     const int itemsPerPage = 15;
     int skipCount = page * itemsPerPage;
 
-    // Array size must match itemsPerPage
     String pageFiles[15]; 
     int totalJpgs = 0;
     int storedInPage = 0;
 
-    String html = "<html><head><title>S3 Gallery</title>";
-    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-    html += "<style>body{font-family:sans-serif;text-align:center;background:#1a1a1a;color:white;}"
-            ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:15px;padding:20px;}"
-            "img{width:100%;border-radius:8px;height:180px;object-fit:cover;cursor:pointer;}"
-            ".nav-bar{margin:20px 0;display:flex;justify-content:center;gap:10px;}"
-            ".nav-btn{background:#00afff;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}"
-            ".nav-btn:disabled{background:#444;color:#888;cursor:not-allowed;}</style></head><body>";
-    
-    html += "<div style='padding:10px;'>";
-    html += "<button onclick=\"cleanExit('/stream')\" style=\"background:#c8e6c9; border:none; padding:10px; border-radius:5px; margin:5px; cursor:pointer;\">LIVE STREAM</button>";
-    html += "<button onclick=\"cleanExit('/')\" style=\"background:#ffcdd2; border:none; padding:10px; border-radius:5px; margin:5px; cursor:pointer;\">BACK TO MENU</button>";
-    html += "</div>";
-    
-    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
-    
-    
-    html += "<div class='nav-bar'>";
-    
-    // Previous Button logic
-    if (page > 0) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
-    }
-
-    // Next Button logic
-    if (totalJpgs > (skipCount + itemsPerPage)) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
-    }
-    
-    html += "</div>";
-
-
-    html += "<div class='grid'>";
-
+    // --- STEP 1: SCAN SD CARD FIRST ---
+    // We must do this first so we know the 'totalJpgs' count
     File root = SD_MMC.open("/");
     if (!root) {
         server.send(500, "text/plain", "SD Card Error");
@@ -1079,7 +1051,6 @@ void handle_gallery() {
     while(file) {
         String name = String(file.name());
         if(name.endsWith(".jpg") || name.endsWith(".JPG")) {
-            // Logic to capture only the 15 images for the current page
             if (totalJpgs >= skipCount && storedInPage < itemsPerPage) {
                 String fixedPath = name.startsWith("/") ? name : "/" + name;
                 pageFiles[storedInPage] = fixedPath;
@@ -1092,38 +1063,43 @@ void handle_gallery() {
     }
     root.close();
 
+    // --- STEP 2: NOW BUILD THE HTML (Now totalJpgs is accurate!) ---
+    String html = "<html><head><title>S3 Gallery</title>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:sans-serif;text-align:center;background:#1a1a1a;color:white;}"
+            ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:15px;padding:20px;}"
+            "img{width:100%;border-radius:8px;height:180px;object-fit:cover;cursor:pointer;}"
+            ".nav-bar{margin:20px 0;display:flex;justify-content:center;gap:10px;}"
+            ".nav-btn{background:#00afff;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}"
+            ".nav-btn:disabled{background:#444;color:#888;cursor:not-allowed;}</style></head><body>";
+    
+    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
+
+    // Re-usable navigation snippet
+    String navHtml = "<div class='nav-bar'>";
+    if (page > 0) {
+        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
+    } else {
+        navHtml += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
+    }
+
+    if (totalJpgs > (skipCount + itemsPerPage)) {
+        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
+    } else {
+        navHtml += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
+    }
+    navHtml += "</div>";
+
+    // Insert navigation at the TOP
+    html += navHtml;
+
+    html += "<div class='grid'>";
     for (int i = 0; i < storedInPage; i++) {
         html += "<div><a href='/saved_file?path=" + pageFiles[i] + "' target='_blank'>";
         html += "<img src='/saved_file?path=" + pageFiles[i] + "' loading='lazy'></a>";
         html += "<p style='font-size:10px;'>" + pageFiles[i].substring(1) + "</p>";
         html += "<button onclick=\"sendMail('" + pageFiles[i] + "', this)\" style='width:100%; cursor:pointer; background:#4CAF50; color:white; border:none; padding:5px; border-radius:3px;'>send via Email</button></div>";
     }
-
-    if(storedInPage == 0 && totalJpgs > 0) {
-        html += "<p>No images found on this page. Total images: " + String(totalJpgs) + "</p>";
-    } else if (totalJpgs == 0) {
-        html += "<p>SD card is empty or failed to read.</p>";
-    }
-    
-    html += "</div>";
-
-    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
-    html += "<div class='nav-bar'>";
-    
-    // Previous Button logic
-    if (page > 0) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
-    }
-
-    // Next Button logic
-    if (totalJpgs > (skipCount + itemsPerPage)) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
-    }
-    
     html += "</div>";
 
     html += "<script>";
@@ -1156,9 +1132,16 @@ void verifySD() {
 }
 
 
+
+
 void handle_sd_test() {
-    String output = "SD CARD FILE LIST:\n";
-    output += "------------------\n";
+    // Change output to HTML format
+    String output = "<html><head><title>SD Card Files</title>";
+    output += "<style>body { font-family: monospace; background-color: #1a1a1a; color: #00ff00; padding: 20px; }";
+    output += "a { color: #4db8ff; text-decoration: none; } a:hover { text-decoration: underline; }</style>";
+    output += "</head><body>";
+    output += "<h2>SD CARD FILE LIST:</h2>";
+    output += "<hr>";
 
     File root = SD_MMC.open("/");
     if (!root) {
@@ -1170,11 +1153,15 @@ void handle_sd_test() {
     int count = 0;
 
     while(file) {
+        String fileName = String(file.name());
         output += "[" + String(count) + "] ";
+        
         if (file.isDirectory()) {
-            output += "DIR : " + String(file.name()) + "\n";
+            output += "DIR : " + fileName + "<br>";
         } else {
-            output += "FILE: " + String(file.name()) + " (" + String(file.size()) + " bytes)\n";
+            // Create a link to the file. 
+            // This assumes you have a handler at /download?file=filename
+            output += "FILE: <a href='/" + fileName + "' target='_blank'>" + fileName + "</a> (" + String(file.size()) + " bytes)<br>";
         }
         count++;
         file.close();
@@ -1184,8 +1171,13 @@ void handle_sd_test() {
 
     if (count == 0) output += "No files found on card.";
     
-    server.send(200, "text/plain", output);
+    output += "</body></html>";
+    
+    // Send as text/html instead of text/plain
+    server.send(200, "text/html", output);
 }
+
+
 
 void handle_saved_file() {
     if (!server.hasArg("path")) {

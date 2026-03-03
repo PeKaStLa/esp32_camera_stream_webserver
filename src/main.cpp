@@ -763,10 +763,11 @@ void handle_stream_page() {
                 <button onclick="updateStream('fb_count','2')">FB:2</button>
                 <button onclick="updateStream('fb_count','3')">FB:3</button>
             </div>
-            <div class='nav-group'>
-                <button onclick="cleanExit('/capture')" style="background:#c8e6c9;">DETAILED CAPTURE PAGE</button>
-                <button onclick="cleanExit('/back')" style="background:#ffcdd2;">EXIT TO MENU</button>
-            </div>
+            <div class='nav-group' style="margin: 15px 0; display: flex; justify-content: center; gap: 10px;">
+    <button onclick="cleanExit('/capture')" style="background:#c8e6c9; border:none; padding:12px 20px; border-radius:8px; cursor:pointer; font-weight:bold;">to CAPTURE PAGE</button>
+    <button onclick="cleanExit('/gallery')" style="background:#bbdefb; border:none; padding:12px 20px; border-radius:8px; cursor:pointer; font-weight:bold;">to GALLERY</button>
+    <button onclick="cleanExit('/')" style="background:#ffcdd2; border:none; padding:12px 20px; border-radius:8px; cursor:pointer; font-weight:bold;">TO MENU</button>
+</div>
         </div>
     </div>
     <script>
@@ -1075,6 +1076,14 @@ void handle_gallery() {
     
     html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
 
+    // --- NEW NAVIGATION GROUP (Back to Stream/Menu) ---
+    html += "<div class='nav-group'>";
+    html += "  <button onclick=\"cleanExit('/stream')\" style=\"background:#e3f2fd;\">LIVE STREAM</button>";
+    html += "  <button onclick=\"cleanExit('/capture')\" style=\"background:#c8e6c9;\">CAPTURE PAGE</button>";
+    html += "  <button onclick=\"cleanExit('/')\" style=\"background:#ffcdd2;\">MENU</button>";
+    html += "</div>";
+
+    
     // Re-usable navigation snippet
     String navHtml = "<div class='nav-bar'>";
     if (page > 0) {

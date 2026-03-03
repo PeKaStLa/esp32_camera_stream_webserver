@@ -1033,13 +1033,13 @@ void handle_move() {
     String direction = server.arg("dir");
 
     if (direction == "forward") {
-        stepper1.move(2000);
+        stepper1.move(-1000);
     } else if (direction == "backward") {
-        stepper1.move(-2000);
+        stepper1.move(1000);
     } else if (direction == "left") {
-        stepper2.move(2000);
+        stepper2.move(-1000);
     } else if (direction == "right") {
-        stepper2.move(-2000);
+        stepper2.move(1000);
     } else if (direction == "stop") {
         stop_motors();
     }
@@ -1084,10 +1084,34 @@ void handle_gallery() {
     const int itemsPerPage = 15;
     int totalJpgs = 0;
 
-    // --- STEP 1: FIRST PASS - COUNT TOTAL JPGs ---
+    // 1. Kill the noise immediately
+    esp_camera_deinit();
+    delay(100);
+
+    // 2. Try to open root
     File root = SD_MMC.open("/");
+    
     if (!root) {
-        server.send(500, "text/plain", "SD Card Error");
+        Serial.println("[SD] Hard error detected. Attempting Bus Reset...");
+        SD_MMC.end();
+        delay(200); 
+        
+        // Force the pins to a known state before re-init
+        pinMode(39, INPUT_PULLUP); // D0
+        pinMode(38, INPUT_PULLUP); // CLK
+        pinMode(40, INPUT_PULLUP); // CMD
+        delay(100);
+
+        if (!SD_MMC.begin("/sdcard", true, true, 20000)) {
+            // Still failing? The card might be stuck.
+            server.send(500, "text/plain", "SD Card Hardware Lockup. Please power cycle the device.");
+            return;
+        }
+        root = SD_MMC.open("/");
+    }
+    
+    if (!root) {
+        server.send(500, "text/plain", "SD Card Error: Directory could not be read.");
         return;
     }
 
@@ -1314,7 +1338,7 @@ void setup() {
     delay(900);
 
     SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0 sdmmc_card_init failed (0x107).
-    if (!SD_MMC.begin("/sdcard", true, false, 20000)) {
+    if (!SD_MMC.begin("/sdcard", true, true, 20000)) {
         Serial.println("SDMMC Mount Failed!");
     } else {
         Serial.println("SDMMC Mount SUCCESS!");
@@ -1353,12 +1377,17 @@ void setup() {
     Serial.println(WiFi.localIP());
 
     Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+
+
     // Attempt to initialize camera until success
     while (init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) {
         Serial.println("Camera failed to initialize! Retrying in 1 second...");
         delay(1000);  // wait a bit before retry
     }
     Serial.println("Camera initialized successfully!");
+
+
+
     Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
     
     stepper1.setMaxSpeed(1000.0);

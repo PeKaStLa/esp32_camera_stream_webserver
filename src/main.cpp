@@ -148,10 +148,6 @@ int stream_framesize_index = 0; // default qVGA
 int current_stream_fb_count = 3;
 
 
-// ------------------- WIFI -------------------
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
-
 // ------------------- SMTP SETTINGS -----------------
 const char* smtp_host = SMTP_HOST;
 const int smtp_port = SMTP_PORT;
@@ -1107,7 +1103,7 @@ void handle_gallery() {
     int page = 0; 
     if (server.hasArg("page")) page = server.arg("page").toInt();
     
-    const int itemsPerPage = 15;
+    const int itemsPerPage = 6;
     int totalJpgs = 0;
 
     // 1. Kill the noise immediately
@@ -1157,7 +1153,7 @@ void handle_gallery() {
     int endAt = totalJpgs - (page * itemsPerPage) - 1;
     if (startAt < 0) startAt = 0;
 
-    String pageFiles[15]; 
+    String pageFiles[6]; 
     int currentJpgIndex = 0;
     int storedInPage = 0;
 
@@ -1343,59 +1339,34 @@ void handle_saved_file() {
 
 
 
-// ------------------- ARDUINO -------------------
+
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n--- BOOT ---");
-    delay(900);
+    Serial.println("-- BOOT ---");
 
+    // 1. KICK OFF HOTSPOT ATTEMPT IMMEDIATELY (Non-blocking)
+    WiFi.begin(WIFI_SSID_HOTSPOT, WIFI_PASSWORD_HOTSPOT);
+    WiFi.setSleep(false); 
+
+    // 2. DO OTHER WORK (This "masks" the connection time)
+    delay(900);
     long start = millis();
-    while (!Serial && millis() - start < 2000) {
-        delay(10);
-    }
+    while (!Serial && millis() - start < 2000) { delay(10); }
 
     for (int i = 0; i < BUFFER_SIZE; i++) {
-    photo_buffer[i] = nullptr;
-    photo_lengths[i] = 0;
+        photo_buffer[i] = nullptr;
+        photo_lengths[i] = 0;
     }
 
-   
+    printf("[System] Free Internal RAM: %d bytes | Free PSRAM: %d\n", ESP.getFreeHeap(), ESP.getFreePsram());
 
-
-
-
-    printf("[System] Hook initialized. Buffer at: %p\n", log_buffer);
-
-    printf("[System] Free Internal RAM: %d bytes | Free PSRAM: %d bytes | Max Alloc Block: %d\n", 
-       ESP.getFreeHeap(), 
-       ESP.getFreePsram(), 
-       ESP.getMaxAllocHeap());
-       
-
-    SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0 sdmmc_card_init failed (0x107).
+    SD_MMC.setPins(39, 38, 40);
     if (!SD_MMC.begin("/sdcard", true, true, 20000)) {
-        printf("[Custom] SD Error detected! Time: %lu\n", millis());
         Serial.println("SDMMC Mount Failed!");
     } else {
-        printf("[Custom] SDMMC Mount SUCCESS! Time: %lu\n", millis());
         Serial.println("SDMMC Mount SUCCESS!");
-        // Now that it is mounted, you can call a simple test
         verifySD(); 
     }
-
-
-    WiFi.begin(ssid, password);
-    WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
-    Serial.print("Connecting to WiFi");
-    while(WiFi.status() != WL_CONNECTED){
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println();
-    Serial.print("WiFi connected! IP: ");
-    Serial.println(WiFi.localIP());
-
-
 
     // Attempt to initialize camera until success
     while (init_camera(stream_framesizes[stream_framesize_index], 45, current_stream_fb_count) != ESP_OK) {
@@ -1404,14 +1375,35 @@ void setup() {
     }
     Serial.println("Camera initialized successfully!");
 
-
-
-    
     stepper1.setMaxSpeed(1000.0);
     stepper1.setAcceleration(500.0);
-
     stepper2.setMaxSpeed(1000.0);
     stepper2.setAcceleration(500.0);
+
+
+    // 3. CHECK HOTSPOT STATUS & FALLBACK IF NEEDED
+    Serial.print("Checking Hotspot status...");
+    int hotspot_timeout = 0;
+    // We only wait a little bit here because we already gave it time above
+    while (WiFi.status() != WL_CONNECTED && hotspot_timeout < 5) { 
+        delay(500);
+        Serial.print(".");
+        hotspot_timeout++;
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\nHotspot not found. Trying Home WLAN...");
+        WiFi.disconnect();
+        WiFi.begin(WIFI_SSID_WLAN, WIFI_PASSWORD_WLAN);
+        WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
+        Serial.print("Connecting to WiFi");
+        while (WiFi.status() != WL_CONNECTED) {
+            delay(500);
+            Serial.print(".");
+        }
+    }
+    Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
+
+
 
     server.on("/", handle_root);           // Now just the IP will work!
     server.on("/capture", handle_capture_page);

@@ -13,7 +13,15 @@
 #include "SPI.h"
 #include "SD_MMC.h"
 
+#include <stdio.h>
+#include <stdarg.h>
+
+
 static const char* TAG = "camera";
+
+#define LOG_BUFFER_SIZE 65536 // 64KB - you have plenty of PSRAM
+char* log_buffer = nullptr;
+size_t log_pos = 0;
 
 #define BUFFER_SIZE 10
 #define MAX_UXGA_SIZE (1024 * 1024) // 1MB per slot
@@ -31,6 +39,8 @@ WebServer server(80);
 // initialize the stepper library on pins 8 through 11:
 AccelStepper stepper2(AccelStepper::FULL4WIRE, 1, 42, 2, 41);
 AccelStepper stepper1(AccelStepper::FULL4WIRE, 47, 14, 21, 3);
+
+
 
 
 
@@ -636,12 +646,20 @@ void handle_send_email() {
     // 1. Check if we are sending from SD (Gallery) or RAM (Stream Button)
     if (server.hasArg("path")) {
         path = server.arg("path");
+
         File file = SD_MMC.open(path, FILE_READ);
         if (!file) {
             server.send(404, "text/plain", "File not found on SD card.");
             return;
         }
         fileSize = file.size();
+
+        if (fileSize == 0 || fileSize > 1024 * 1024) {
+            file.close();  // Close before returning
+            server.send(413, "text/plain", "Image too large for email buffer");
+            return;
+        }
+
         temp_buf = (uint8_t*)ps_malloc(fileSize);
         if (temp_buf) {
             file.read(temp_buf, fileSize);
@@ -657,6 +675,14 @@ void handle_send_email() {
         if (total_buffered > 0 && photo_buffer[lastIdx] != nullptr) {
             fileSize = photo_lengths[lastIdx];
             
+            // <-- Add size check here
+            if (fileSize == 0 || fileSize > 1024 * 1024) {
+                server.send(413, "text/plain", "Image too large for email buffer");
+                return;
+            }
+
+
+
             temp_buf = (uint8_t*)ps_malloc(fileSize); 
             if (temp_buf) {
                 // Typo fixed: lastIdx
@@ -823,7 +849,7 @@ void handle_stream_page() {
                         status.innerText = 'SUCCESS!';
                         document.getElementById('capLink').innerHTML = '<a href="/last_buffer.jpg" target="_blank">View Photo</a>';
                         emailBtn.style.display = 'block'; // Show email button after success
-                        emailBtn.innerText = '📧 Email Last Photo';
+                        emailBtn.innerText = 'Email Last Photo';
                         emailBtn.style.background = '#4CAF50';
                     }
                 }).finally(() => {
@@ -846,19 +872,19 @@ void handle_stream_page() {
             // your ESP32 handle_send_email logic should serve from the latest buffer slot.
             fetch('/send_email').then(r => {
                 if(r.ok) {
-                    eBtn.innerText = '✅ Sent!';
+                    eBtn.innerText = 'Sent!';
                     eBtn.style.background = '#2e7d32';
                 } else {
-                    eBtn.innerText = '❌ Error';
+                    eBtn.innerText = 'Error';
                     eBtn.style.background = '#c62828';
                 }
                 setTimeout(() => { 
                     eBtn.disabled = false; 
-                    eBtn.innerText = '📧 Email Last Photo'; 
+                    eBtn.innerText = 'Email Last Photo'; 
                     eBtn.style.background = '#4CAF50';
                 }, 3000);
             }).catch(() => {
-                eBtn.innerText = '❌ Failed';
+                eBtn.innerText = 'Failed';
                 eBtn.disabled = false;
             });
         }
@@ -1221,15 +1247,13 @@ void handle_gallery() {
     html += "    else alert('Error deleting file');";
     html += "  });";
     html += "}";
-    html += "function sendMail(p, b) { b.innerText='...'; fetch('/send_email?path='+p).then(r=>r.ok?b.innerText='Sent!':b.innerText='Err'); }";
+    html += "function sendMail(p, b) { b.innerText='...'; fetch('/send_email?path=' + encodeURIComponent(p)).then(r=>r.ok?b.innerText='Sent!':b.innerText='Err'); }";
+    html += "function sendMail(p, b) {b.innerText = 'Sending...'; b.disabled = true;fetch('/send_email?path=' + encodeURIComponent(p)).then(response => {if (response.ok) {b.innerText = 'Sent!';b.style.background = '#2e7d32';} else {response.text().then(text => {b.innerText = 'Error ' + response.status + ': ' + text;b.style.background = '#c62828';}).catch(() => {b.innerText = 'Error ' + response.status;b.style.background = '#c62828';});}}).catch(err => {console.error('Fetch failed:', err);b.innerText = 'Network/Timeout: ' + err.message;b.style.background = '#c62828';}).finally(() => {setTimeout(() => { b.disabled = false; b.innerText = 'Send Photo'; b.style.background = '#4CAF50';}, 3000);});}";
     html += "function cleanExit(t) { window.stop(); window.location.href = t; }";
     html += "</script></body></html>";
 
     server.send(200, "text/html", html);
 }
-
-
-
 
 
 
@@ -1322,48 +1346,43 @@ void handle_saved_file() {
 // ------------------- ARDUINO -------------------
 void setup() {
     Serial.begin(115200);
-    
-    // This waits up to 3 seconds for you to open the Serial Monitor window
+    Serial.println("\n--- BOOT ---");
+    delay(900);
+
     long start = millis();
-    while (!Serial && millis() - start < 9000) {
+    while (!Serial && millis() - start < 2000) {
         delay(10);
     }
 
     for (int i = 0; i < BUFFER_SIZE; i++) {
     photo_buffer[i] = nullptr;
     photo_lengths[i] = 0;
-}
+    }
 
-    Serial.println("\n--- BOOT ---");
-    delay(900);
+   
+
+
+
+
+    printf("[System] Hook initialized. Buffer at: %p\n", log_buffer);
+
+    printf("[System] Free Internal RAM: %d bytes | Free PSRAM: %d bytes | Max Alloc Block: %d\n", 
+       ESP.getFreeHeap(), 
+       ESP.getFreePsram(), 
+       ESP.getMaxAllocHeap());
+       
 
     SD_MMC.setPins(39, 38, 40); // CLK, CMD, D0 sdmmc_card_init failed (0x107).
     if (!SD_MMC.begin("/sdcard", true, true, 20000)) {
+        printf("[Custom] SD Error detected! Time: %lu\n", millis());
         Serial.println("SDMMC Mount Failed!");
     } else {
+        printf("[Custom] SDMMC Mount SUCCESS! Time: %lu\n", millis());
         Serial.println("SDMMC Mount SUCCESS!");
         // Now that it is mounted, you can call a simple test
         verifySD(); 
     }
 
-    if (!psramFound()) {
-        Serial.println("PSRAM NOT FOUND - CAMERA WILL NOT WORK");
-        while (true) {
-            delay(1000);
-        }
-    }
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-
-
-    Serial.printf("✅ PSRAM OK: %d bytes\n", ESP.getPsramSize());
-    Serial.printf("PSRAM: %s\n", psramFound() ? "OK" : "FAIL");
-
-    // Wait up to 5 seconds for Serial Monitor to open
-    while (!Serial && millis() < 5000) {
-        delay(10);
-    }
-
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
 
     WiFi.begin(ssid, password);
     WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
@@ -1376,7 +1395,6 @@ void setup() {
     Serial.print("WiFi connected! IP: ");
     Serial.println(WiFi.localIP());
 
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
 
 
     // Attempt to initialize camera until success
@@ -1388,7 +1406,6 @@ void setup() {
 
 
 
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
     
     stepper1.setMaxSpeed(1000.0);
     stepper1.setAcceleration(500.0);
@@ -1420,7 +1437,7 @@ void setup() {
 }
 
 unsigned long lastLogTime = 0;
-const unsigned long logInterval = 5000; // Print every 5 seconds
+const unsigned long logInterval = 15000; // Print every 5 seconds
 
 unsigned long lastMotorTime = 0;
 const unsigned long motorInterval = 1000; // Print every 5 seconds
@@ -1435,8 +1452,15 @@ void loop() {
     // Periodic Heartbeat Log
     if (millis() - lastLogTime >= logInterval) {
         lastLogTime = millis();
-
-        
+        printf("[System] Free Internal RAM: %d bytes | Free PSRAM: %d bytes | Max Alloc Block: %d\n", 
+            ESP.getFreeHeap(), 
+            ESP.getFreePsram(), 
+            ESP.getMaxAllocHeap());
+                
+        printf("[SD_Stats] Card Type: %d | Total: %lluMB | Used: %lluMB\n", 
+            SD_MMC.cardType(), 
+            SD_MMC.totalBytes() / (1024 * 1024), 
+            SD_MMC.usedBytes() / (1024 * 1024));
         
         if (WiFi.status() == WL_CONNECTED) {
             Serial.print("[LOG] IP: ");

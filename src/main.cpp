@@ -523,6 +523,9 @@ String getMotorControls() {
 
 
 
+
+
+
 void handle_capture_page() {
     // CRITICAL: Stop the camera before doing anything else
     esp_camera_deinit(); 
@@ -616,6 +619,15 @@ void handle_capture_page() {
 
 
 
+
+
+
+
+
+
+
+
+
 void handle_send_email() {
     uint8_t* temp_buf = nullptr;
     size_t fileSize = 0;
@@ -639,29 +651,39 @@ void handle_send_email() {
     } 
     else {
         // 2. No path? Send the LATEST photo from the RAM Circular Buffer
+        // Note: Check that BUFFER_SIZE is defined in your globals!
         int lastIdx = (current_buffer_idx - 1 + BUFFER_SIZE) % BUFFER_SIZE;
         
         if (total_buffered > 0 && photo_buffer[lastIdx] != nullptr) {
             fileSize = photo_lengths[lastIdx];
-            temp_buf = (uint8_t*)ps_malloc(fileSize); // Copy to temp so we don't block the buffer
+            
+            temp_buf = (uint8_t*)ps_malloc(fileSize); 
             if (temp_buf) {
+                // Typo fixed: lastIdx
                 memcpy(temp_buf, photo_buffer[lastIdx], fileSize);
+                Serial.printf("[Email] Sending RAM buffer [%d] size: %d bytes\n", lastIdx, (int)fileSize);
+            } else {
+                server.send(500, "text/plain", "PSRAM Allocation Failed for RAM buffer");
+                return;
             }
-            Serial.println("[Stream] Sending latest RAM capture via Email...");
         } else {
             server.send(404, "text/plain", "No recent image in RAM buffer.");
             return;
         }
-    }
+    } // <--- THIS WAS THE MISSING BRACE in your original code
 
     // 3. Final Check and Send
     if (temp_buf == nullptr) {
-        server.send(500, "text/plain", "PSRAM Allocation Failed");
+        server.send(500, "text/plain", "Memory Error: Could not prepare image.");
         return;
     }
 
+    // Call your actual SMTP function
     bool ok = send_email_from_buffer(smtp_to, temp_buf, fileSize);
-    free(temp_buf); // Always free the temporary copy
+    
+    // Crucial: Free the memory regardless of success or failure
+    free(temp_buf); 
+    temp_buf = nullptr;
 
     if (ok) {
         server.send(200, "text/plain", "Email sent successfully!");
@@ -669,6 +691,9 @@ void handle_send_email() {
         server.send(500, "text/plain", "SMTP server rejected the email.");
     }
 }
+
+
+
 
 
 
@@ -1023,6 +1048,29 @@ void handle_move() {
 }
 
 
+void handle_delete() {
+    if (!server.hasArg("path")) {
+        server.send(400, "text/plain", "Missing path");
+        return;
+    }
+    String path = server.arg("path");
+    
+    if (SD_MMC.remove(path)) {
+        Serial.println("Deleted: " + path);
+        server.send(200, "text/plain", "Deleted");
+    } else {
+        server.send(500, "text/plain", "Delete Failed");
+    }
+}
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1034,101 +1082,142 @@ void handle_gallery() {
     if (server.hasArg("page")) page = server.arg("page").toInt();
     
     const int itemsPerPage = 15;
-    int skipCount = page * itemsPerPage;
-
-    String pageFiles[15]; 
     int totalJpgs = 0;
-    int storedInPage = 0;
 
-    // --- STEP 1: SCAN SD CARD FIRST ---
-    // We must do this first so we know the 'totalJpgs' count
+    // --- STEP 1: FIRST PASS - COUNT TOTAL JPGs ---
     File root = SD_MMC.open("/");
     if (!root) {
         server.send(500, "text/plain", "SD Card Error");
         return;
     }
 
+    File countFile = root.openNextFile();
+    while(countFile) {
+        String name = String(countFile.name());
+        if(name.endsWith(".jpg") || name.endsWith(".JPG")) {
+            totalJpgs++;
+        }
+        countFile.close();
+        countFile = root.openNextFile();
+    }
+    root.rewindDirectory(); 
+
+    // --- STEP 2: CALCULATE WINDOW FOR "LATEST FIRST" ---
+    int startAt = totalJpgs - ((page + 1) * itemsPerPage);
+    int endAt = totalJpgs - (page * itemsPerPage) - 1;
+    if (startAt < 0) startAt = 0;
+
+    String pageFiles[15]; 
+    int currentJpgIndex = 0;
+    int storedInPage = 0;
+
+    // --- STEP 3: SECOND PASS - GRAB FILES ---
     File file = root.openNextFile();
     while(file) {
         String name = String(file.name());
         if(name.endsWith(".jpg") || name.endsWith(".JPG")) {
-            if (totalJpgs >= skipCount && storedInPage < itemsPerPage) {
-                String fixedPath = name.startsWith("/") ? name : "/" + name;
-                pageFiles[storedInPage] = fixedPath;
-                storedInPage++;
+            if (currentJpgIndex >= startAt && currentJpgIndex <= endAt) {
+                int slot = endAt - currentJpgIndex; 
+                if (slot >= 0 && slot < itemsPerPage) {
+                    String fixedPath = name.startsWith("/") ? name : "/" + name;
+                    pageFiles[slot] = fixedPath;
+                    storedInPage++;
+                }
             }
-            totalJpgs++; 
+            currentJpgIndex++;
         }
-        file.close(); 
+        file.close();
         file = root.openNextFile();
     }
     root.close();
 
-    // --- STEP 2: NOW BUILD THE HTML (Now totalJpgs is accurate!) ---
+    // --- STEP 4: BUILD HTML ---
     String html = "<html><head><title>S3 Gallery</title>";
     html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:sans-serif;text-align:center;background:#1a1a1a;color:white;}"
             ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:15px;padding:20px;}"
+            ".card{background:#2a2a2a;padding:10px;border-radius:10px;transition:0.3s;}"
             "img{width:100%;border-radius:8px;height:180px;object-fit:cover;cursor:pointer;}"
             ".nav-bar{margin:20px 0;display:flex;justify-content:center;gap:10px;}"
+            ".nav-group{margin:15px 0; display:flex; justify-content:center; gap:5px; flex-wrap:wrap;}"
+            ".nav-group button{border:none; padding:10px 15px; border-radius:5px; cursor:pointer; font-weight:bold;}"
             ".nav-btn{background:#00afff;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}"
+            ".btn-row{display:flex; gap:5px; margin-top:10px;}"
+            ".btn-del{background:#f44336; flex:1; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer;}"
+            ".btn-mail{background:#4CAF50; flex:1; color:white; border:none; padding:8px; border-radius:4px; cursor:pointer;}"
             ".nav-btn:disabled{background:#444;color:#888;cursor:not-allowed;}</style></head><body>";
     
-    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
+    html += "<h1>Latest Captures (Page " + String(page + 1) + ")</h1>";
 
-    // --- NEW NAVIGATION GROUP (Back to Stream/Menu) ---
     html += "<div class='nav-group'>";
     html += "  <button onclick=\"cleanExit('/stream')\" style=\"background:#e3f2fd;\">LIVE STREAM</button>";
     html += "  <button onclick=\"cleanExit('/capture')\" style=\"background:#c8e6c9;\">CAPTURE PAGE</button>";
     html += "  <button onclick=\"cleanExit('/')\" style=\"background:#ffcdd2;\">MENU</button>";
     html += "</div>";
 
-    
-    // Re-usable navigation snippet
     String navHtml = "<div class='nav-bar'>";
     if (page > 0) {
-        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
+        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Newer</button>";
     } else {
-        navHtml += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
+        navHtml += "<button class='nav-btn' disabled>&larr; LATEST</button>";
     }
-
-    if (totalJpgs > (skipCount + itemsPerPage)) {
-        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
+    if (startAt > 0) {
+        navHtml += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Older &rarr;</button>";
     } else {
-        navHtml += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
+        navHtml += "<button class='nav-btn' disabled>OLDEST &rarr;</button>";
     }
     navHtml += "</div>";
 
-    // Insert navigation at the TOP
     html += navHtml;
-
     html += "<div class='grid'>";
-    for (int i = 0; i < storedInPage; i++) {
-        html += "<div><a href='/saved_file?path=" + pageFiles[i] + "' target='_blank'>";
-        html += "<img src='/saved_file?path=" + pageFiles[i] + "' loading='lazy'></a>";
-        html += "<p style='font-size:10px;'>" + pageFiles[i].substring(1) + "</p>";
-        html += "<button onclick=\"sendMail('" + pageFiles[i] + "', this)\" style='width:100%; cursor:pointer; background:#4CAF50; color:white; border:none; padding:5px; border-radius:3px;'>send via Email</button></div>";
+    
+    for (int i = 0; i < itemsPerPage; i++) {
+        if (pageFiles[i] != "") {
+            String cardId = "card_" + String(i);
+            html += "<div class='card' id='" + cardId + "'>";
+            html += "<a href='/saved_file?path=" + pageFiles[i] + "' target='_blank'>";
+            html += "<img src='/saved_file?path=" + pageFiles[i] + "' loading='lazy'></a>";
+            html += "<p style='font-size:10px; margin:8px 0;'>" + pageFiles[i].substring(1) + "</p>";
+            html += "<div class='btn-row'>";
+            html += "<button class='btn-mail' onclick=\"sendMail('" + pageFiles[i] + "', this)\">Email</button>";
+            html += "<button class='btn-del' onclick=\"deleteFile('" + pageFiles[i] + "', '" + cardId + "')\">Delete</button>";
+            html += "</div></div>";
+        }
     }
     html += "</div>";
 
-    html += "<script>";
-    html += "function sendMail(p, b) {";
-    html += "  b.innerText='Sending...'; b.disabled=true;";
-    html += "  fetch('/send_email?path='+p).then(r => {";
-    html += "    if(r.ok) { b.innerText='Sent!'; b.style.background='#2e7d32'; }";
-    html += "    else { b.innerText='Error'; b.style.background='#c62828'; }";
-    html += "    setTimeout(() => { b.disabled=false; b.innerText='Email'; b.style.background='#4CAF50'; }, 3000);";
-    html += "  }).catch(() => { b.innerText='Failed'; b.disabled=false; });";
-    html += "}";
+    html += navHtml;
+    html += "<p style='color:#666;'>Total Images: " + String(totalJpgs) + "</p>";
 
-    html += "function cleanExit(targetUrl) {";
-    html += "  window.stop();"; 
-    html += "  window.location.href = targetUrl;";
+    html += "<script>";
+    html += "function deleteFile(path, id) {";
+    html += "  if(!confirm('Delete this image?')) return;";
+    html += "  fetch('/delete_file?path=' + path).then(r => {";
+    html += "    if(r.ok) document.getElementById(id).style.display='none';";
+    html += "    else alert('Error deleting file');";
+    html += "  });";
     html += "}";
+    html += "function sendMail(p, b) { b.innerText='...'; fetch('/send_email?path='+p).then(r=>r.ok?b.innerText='Sent!':b.innerText='Err'); }";
+    html += "function cleanExit(t) { window.stop(); window.location.href = t; }";
     html += "</script></body></html>";
 
     server.send(200, "text/html", html);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 void verifySD() {
@@ -1188,24 +1277,22 @@ void handle_sd_test() {
 
 
 
-void handle_saved_file() {
-    if (!server.hasArg("path")) {
-        server.send(400, "text/plain", "Missing Path");
-        return;
-    }
-    String path = server.arg("path");
-    
-    // Open the file from SD_MMC
-    File file = SD_MMC.open(path, FILE_READ);
-    if (!file) {
-        server.send(404, "text/plain", "File Not Found");
-        return;
-    }
 
-    // This streams the file directly to the browser
-    server.streamFile(file, "image/jpeg");
-    file.close();
+
+void handle_saved_file() {
+    if (server.hasArg("path")) {
+        String path = server.arg("path");
+        File file = SD_MMC.open(path, "r");
+        if (file) {
+            server.streamFile(file, "image/jpeg");
+            file.close();
+        } else {
+            server.send(404, "text/plain", "File Not Found");
+        }
+    }
 }
+
+
 
 
 // ------------------- ARDUINO -------------------
@@ -1294,6 +1381,7 @@ void setup() {
     server.on("/gallery", handle_gallery);
     server.on("/saved_file", handle_saved_file); 
     server.on("/sdtest", handle_sd_test);   
+    server.on("/delete_file", handle_delete);
     server.onNotFound(handle_NotFound);    // This stops the [E] handler not found error
 
     server.begin();

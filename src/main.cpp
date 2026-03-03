@@ -1047,6 +1047,25 @@ void handle_gallery() {
     
     html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1><div class='grid'>";
 
+    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
+    html += "<div class='nav-bar'>";
+    
+    // Previous Button logic
+    if (page > 0) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; Previous</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
+    }
+
+    // Next Button logic
+    if (totalJpgs > (skipCount + itemsPerPage)) {
+        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">Next &rarr;</button>";
+    } else {
+        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
+    }
+    
+    html += "</div>";
+
     File root = SD_MMC.open("/");
     if (!root) {
         server.send(500, "text/plain", "SD Card Error");
@@ -1085,24 +1104,7 @@ void handle_gallery() {
     
     html += "</div>";
 
-    // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
-    html += "<div class='nav-bar'>";
-    
-    // Previous Button logic
-    if (page > 0) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page - 1) + "')\">&larr; BEFORE</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>&larr; BEFORE</button>";
-    }
 
-    // Next Button logic
-    if (totalJpgs > (skipCount + itemsPerPage)) {
-        html += "<button class='nav-btn' onclick=\"cleanExit('/gallery?page=" + String(page + 1) + "')\">NEXT &rarr;</button>";
-    } else {
-        html += "<button class='nav-btn' disabled>NEXT &rarr;</button>";
-    }
-    
-    html += "</div>";
 
     html += "<script>";
     html += "function sendMail(p, b) {";

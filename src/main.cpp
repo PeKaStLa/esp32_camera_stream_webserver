@@ -1045,8 +1045,8 @@ void handle_gallery() {
     html += "<button onclick=\"cleanExit('/')\" style=\"background:#ffcdd2; border:none; padding:10px; border-radius:5px; margin:5px; cursor:pointer;\">BACK TO MENU</button>";
     html += "</div>";
     
-    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1><div class='grid'>";
-
+    html += "<h1>SD Gallery - Page " + String(page + 1) + "</h1>";
+    
     // --- NAVIGATION BAR (ALWAYS VISIBLE) ---
     html += "<div class='nav-bar'>";
     
@@ -1065,6 +1065,7 @@ void handle_gallery() {
     }
     
     html += "</div>";
+    html += "<div class='grid'>";
 
     File root = SD_MMC.open("/");
     if (!root) {

@@ -136,7 +136,7 @@ camera_config_t camera_config_template = {
 };
 
 // ----------------- RUNTIME SETTINGS -----------------
-int current_capture_quality = 4;
+int current_capture_quality = 6;
 const int capture_qualities[] = {0, 1, 2, 3, 4, 6, 8, 12, 18, 25, 35, 45, 63};
 const int capture_qualities_len = sizeof(capture_qualities) / sizeof(capture_qualities[0]);
 

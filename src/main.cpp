@@ -1348,9 +1348,9 @@ void setup() {
     WiFi.disconnect(true); // Deletes saved credentials and stops any background tasks
     delay(200);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     // KICK OFF HOTSPOT ATTEMPT IMMEDIATELY (Non-blocking)
     WiFi.begin(WIFI_SSID_HOTSPOT, WIFI_PASSWORD_HOTSPOT);
-    WiFi.setSleep(false); 
 
     delay(200);
 
@@ -1396,9 +1396,8 @@ void setup() {
         // CRITICAL: Stop the previous attempt fully before starting new one
         WiFi.disconnect(true); // Deletes saved credentials and stops any background tasks
         delay(200);
-
-        WiFi.begin(WIFI_SSID_WLAN, WIFI_PASSWORD_WLAN);
         WiFi.setSleep(false); // Disables WiFi power saving for instant transmission
+        WiFi.begin(WIFI_SSID_WLAN, WIFI_PASSWORD_WLAN);
         Serial.print("Connecting to WiFi");
         while (WiFi.status() != WL_CONNECTED) {
             delay(500);
